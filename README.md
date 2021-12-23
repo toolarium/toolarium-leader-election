@@ -4,7 +4,7 @@
 
 # toolarium-leader-election
 
-Implements the leader election 
+Implements the leader election api. The implementation supports kubernetes and jgroup binding.
 
 
 ## Built With

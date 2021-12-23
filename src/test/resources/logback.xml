@@ -33,6 +33,7 @@
   <!-- By default only local project logs in debug -->
   <logger name="com.github" level="INFO"/>
   <!-- <logger name="org.jgroups" level="DEBUG"/> -->
+  <!-- <logger name="io.kubernetes" level="DEBUG"/> -->
   <logger name="com.github.toolarium.leader.election" level="DEBUG"/>
   
   <root level="WARN"> 

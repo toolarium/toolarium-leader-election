@@ -54,7 +54,10 @@ public abstract class AbstractLeaderElectorImpl implements ILeaderElector {
             return true;
         }
         
-        LOG.debug("New leader found for [" + getUniqueName() + "].");
+        if (isLeader != null) {
+            LOG.debug("New leader found for [" + getUniqueName() + "].");
+        }
+        
         return false;
     }
 

@@ -10,6 +10,7 @@ import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.impl.jgroup.JGroupLeaderElectorImpl;
 import com.github.toolarium.leader.election.impl.kubernetes.KubernetesLeaderElectorImpl;
+import com.github.toolarium.leader.election.impl.kubernetes.KubernetesUtil;
 import java.io.IOException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -73,7 +74,7 @@ public final class LeaderElectionFactory {
     public ILeaderElector getLeaderElection(LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) throws IOException {
         ILeaderElector leaderElector = null;
         
-        if (KubernetesLeaderElectorImpl.isKubernetesAvailable()) {
+        if (KubernetesUtil.getInstance().isAvailable(leaderElectionInformation)) {
             try {
                 leaderElector = new KubernetesLeaderElectorImpl(leaderElectionInformation, leaderElectionConfiguration);
                 LOG.info("Use kubernetes leader elector.");
