@@ -3,7 +3,6 @@
    logback.xml
    
    Copyright by toolarium-leader-election, all rights reserved.
-   MIT License: https://mit-license.org
 -->
 <configuration>
   <!-- console appender -->

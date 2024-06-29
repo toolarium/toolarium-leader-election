@@ -10,13 +10,16 @@ apply from: "https://raw.githubusercontent.com/toolarium/common-gradle-build/mas
  * Define project dependencies
  ****************************************************************************************/
 dependencies {
-    // see https://docs.gradle.org/current/userguide/java_library_plugin.html
-    implementation 'org.jgroups:jgroups:5.1.9.Final'
+    implementation 'org.jgroups:jgroups:5.3.7.Final'
 
-    implementation 'io.kubernetes:client-java:14.0.0'
-        implementation 'io.kubernetes:client-java-extended:14.0.0'
+    implementation 'io.kubernetes:client-java:20.0.1'
+    implementation 'io.kubernetes:client-java-extended:20.0.1'
+        
+    testImplementation 'com.h2database:h2:2.2.224'
         
     // logging
-    implementation 'org.slf4j:slf4j-api:1.7.30'
-    testRuntimeOnly 'ch.qos.logback:logback-classic:1.2.3'
+    implementation "org.slf4j:slf4j-api:${commonGradleSlf4jApiVersion}"
+    testRuntimeOnly "ch.qos.logback:logback-classic:${commonGradleLogbackVersion}"
+    
+   // testRuntimeOnly "org.junit.platform:junit-platform-commons:1.7.0"
 }
