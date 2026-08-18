@@ -1,17 +1,22 @@
 /*
- * MyLibrary.java
+ * LeaderElectionFactory.java
  *
  * Copyright by toolarium, all rights reserved.
  */
 
 package com.github.toolarium.leader.election;
 
+import com.github.toolarium.leader.election.dto.DatabaseLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.dto.FileLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
-import com.github.toolarium.leader.election.impl.jgroup.JGroupLeaderElectorImpl;
+import com.github.toolarium.leader.election.exception.LeaderElectionException;
+import com.github.toolarium.leader.election.impl.LeaderElectionScheduler;
+import com.github.toolarium.leader.election.impl.database.DatabaseLeaderElectorImpl;
+import com.github.toolarium.leader.election.impl.file.FileLeaderElectorImpl;
 import com.github.toolarium.leader.election.impl.kubernetes.KubernetesLeaderElectorImpl;
 import com.github.toolarium.leader.election.impl.kubernetes.KubernetesUtil;
-import java.io.IOException;
+import com.github.toolarium.leader.election.impl.network.NetworkLeaderElectorImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,7 +35,7 @@ public final class LeaderElectionFactory {
      *
      * @author Patrick Meier
      */
-    private static class HOLDER {
+    private static final class HOLDER {
         static final LeaderElectionFactory INSTANCE = new LeaderElectionFactory();
     }
 
@@ -41,6 +46,7 @@ public final class LeaderElectionFactory {
         // NOP
     }
 
+    
     /**
      * Get the instance
      *
@@ -52,42 +58,117 @@ public final class LeaderElectionFactory {
 
     
     /**
-     * Get the leader electior
+     * Get the leader elector
      *
      * @param leaderElectionInformation the leader election information
      * @return the leader elector
-     * @throws IOException in case of an i/o error
+     * @throws LeaderElectionException In case of an initialisation error
      */
-    public ILeaderElector getLeaderElection(LeaderElectionInformation leaderElectionInformation) throws IOException {
+    public LeaderElector getLeaderElection(LeaderElectionInformation leaderElectionInformation) throws LeaderElectionException {
         return getLeaderElection(leaderElectionInformation, new LeaderElectionConfiguration());
     }
 
     
     /**
-     * Get the leader electior
+     * Get the leader elector
+     *
+     * @param leaderElectionStrategy the leader election strategy. To choose automated put in null. 
+     * @param leaderElectionInformation the leader election information
+     * @return the leader elector
+     * @throws LeaderElectionException In case of an initialisation error
+     */
+    public LeaderElector getLeaderElection(LeaderElectionStrategy leaderElectionStrategy, LeaderElectionInformation leaderElectionInformation) throws LeaderElectionException {
+        return getLeaderElection(leaderElectionStrategy, leaderElectionInformation, new LeaderElectionConfiguration());
+    }
+
+    
+    /**
+     * Get the leader elector
      *
      * @param leaderElectionInformation the leader election information
      * @param leaderElectionConfiguration the leader election configuration
      * @return the leader elector
-     * @throws IOException in case of an i/o error
+     * @throws LeaderElectionException In case of an initialisation error
      */
-    public ILeaderElector getLeaderElection(LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) throws IOException {
-        ILeaderElector leaderElector = null;
-        
-        if (KubernetesUtil.getInstance().isAvailable(leaderElectionInformation)) {
-            try {
-                leaderElector = new KubernetesLeaderElectorImpl(leaderElectionInformation, leaderElectionConfiguration);
-                LOG.info("Use kubernetes leader elector.");
-            } catch (IOException e) {
-                LOG.info("Could not initialize kubernetes leader elector: " + e.getMessage());
+    public LeaderElector getLeaderElection(LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) throws LeaderElectionException {
+        return getLeaderElection(null, leaderElectionInformation, leaderElectionConfiguration);
+    }
+
+    
+    /**
+     * Get the leader elector
+     *
+     * @param inputLeaderElectionStrategy the leader election strategy. To choose automated put in null. 
+     * @param leaderElectionInformation the leader election information
+     * @param leaderElectionConfiguration the leader election configuration
+     * @return the leader elector
+     * @throws LeaderElectionException In case of an initialisation error
+     */
+    public LeaderElector getLeaderElection(LeaderElectionStrategy inputLeaderElectionStrategy, LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) throws LeaderElectionException {
+        LeaderElectionStrategy leaderElectionStrategy = inputLeaderElectionStrategy;
+        if (leaderElectionStrategy == null) {
+            if (KubernetesUtil.getInstance().isAvailable(leaderElectionInformation)) {
+                leaderElectionStrategy = LeaderElectionStrategy.KUBERNETES;
+            } else {
+                leaderElectionStrategy = LeaderElectionStrategy.NETWORK;
             }
         }
 
-        if (leaderElector == null) {
-            LOG.info("Use jgroup leader elector.");
-            leaderElector = new JGroupLeaderElectorImpl(leaderElectionInformation, leaderElectionConfiguration);
+        return selectLeaderElectorBasedOnStrategy(leaderElectionStrategy, leaderElectionInformation, leaderElectionConfiguration);
+    }
+
+    
+    /**
+     * Select the leader elector based on the given strategy.
+     *
+     * @param leaderElectionStrategy the leader election strategy. To choose automated put in null.
+     * @param leaderElectionInformation the leader election information
+     * @param leaderElectionConfiguration the leader election configuration
+     * @return the leader elector
+     * @throws LeaderElectionException In case of an initialisation error
+     */
+    private LeaderElector selectLeaderElectorBasedOnStrategy(LeaderElectionStrategy leaderElectionStrategy, LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) throws LeaderElectionException {
+        LeaderElector leaderElector = null;
+        switch (leaderElectionStrategy) {
+            case FILE:
+                LOG.info("Use file system leader elector.");
+                FileLeaderElectionConfiguration fileLeaderElectionConfiguration = null;
+                if (leaderElectionConfiguration instanceof FileLeaderElectionConfiguration) {
+                    fileLeaderElectionConfiguration = (FileLeaderElectionConfiguration)leaderElectionConfiguration;
+                } else {
+                    fileLeaderElectionConfiguration = new FileLeaderElectionConfiguration(leaderElectionConfiguration.getTimeout(), leaderElectionConfiguration.getRenewDeadline(), leaderElectionConfiguration.getRetryPeriod());
+                }
+                
+                leaderElector = new FileLeaderElectorImpl(leaderElectionInformation, fileLeaderElectionConfiguration);
+                break;
+                
+            case DATABASE:
+                if (leaderElectionConfiguration instanceof DatabaseLeaderElectionConfiguration) {
+                    LOG.info("Use database leader elector.");
+                    leaderElector = new DatabaseLeaderElectorImpl(leaderElectionInformation, (DatabaseLeaderElectionConfiguration)leaderElectionConfiguration);
+                } else {
+                    throw new LeaderElectionException("Invalid configuration. To use database leader election you must define a " + DatabaseLeaderElectionConfiguration.class.getName() + "!");
+                }
+                break;
+
+            case NETWORK:
+                LOG.info("Use network leader elector.");
+                leaderElector = new NetworkLeaderElectorImpl(leaderElectionInformation, leaderElectionConfiguration);
+                break;
+
+            case KUBERNETES:
+                LOG.info("Use kubernetes leader elector.");
+                leaderElector = new KubernetesLeaderElectorImpl(leaderElectionInformation, leaderElectionConfiguration);
+                break;
+                
+            default:
+                break;            
         }
         
+        if (leaderElector != null) {
+            LeaderElectionScheduler.getInstance().register(leaderElector);
+        }
+
         return leaderElector;
     }
 }

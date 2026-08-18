@@ -5,10 +5,12 @@
  */
 package com.github.toolarium.leader.election.impl;
 
-import com.github.toolarium.leader.election.ILeaderElector;
+import com.github.toolarium.leader.election.LeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
-import java.io.IOException;
+import com.github.toolarium.leader.election.exception.LeaderElectionException;
+import java.time.Instant;
+import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,57 +20,118 @@ import org.slf4j.LoggerFactory;
  * 
  * @author patrick
  */
-public abstract class AbstractLeaderElectorImpl implements ILeaderElector {
+public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfiguration> implements LeaderElector {
     private static final Logger LOG = LoggerFactory.getLogger(AbstractLeaderElectorImpl.class);
-    private LeaderElectionInformation leaderElectionInformation;
-    private LeaderElectionConfiguration leaderElectionConfiguration;
-    private final String uniqueName;
+    private final String id;
+    private final LeaderElectionInformation leaderElectionInformation;
+    private final T leaderElectionConfiguration;
     private volatile Boolean isLeader;
-
+    private volatile Instant timestamp;
+    private volatile String description;
+    private volatile boolean isInitialized;
+    
     
     /**
      * Constructor for AbstractLeaderElectorImpl
      * 
      * @param leaderElectionInformation the leader election information
      * @param leaderElectionConfiguration the leader election configuration
-     * @throws IOException in case of an i/o error
      */
-    public AbstractLeaderElectorImpl(LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) 
-            throws IOException {
+    public AbstractLeaderElectorImpl(LeaderElectionInformation leaderElectionInformation, T leaderElectionConfiguration) {
+        this.id = UUID.randomUUID().toString();
         this.leaderElectionInformation = leaderElectionInformation;
         this.leaderElectionConfiguration = leaderElectionConfiguration;
-        this.uniqueName = leaderElectionInformation.getUniqueName();
         isLeader = null;
-        
-        init();
+        description = null;
+        isInitialized = false;
     }
 
     
     /**
-     * @see com.github.toolarium.leader.election.ILeaderElector#isLeader()
+     * @see com.github.toolarium.leader.election.LeaderElector#getId()
+     */
+    @Override
+    public String getId() {
+        return id;
+    }
+
+    
+    /**
+     * @see com.github.toolarium.leader.election.LeaderElector#initialize()
+     * @throws LeaderElectionException In case of an initialisation error
+     */
+    public void initialize() throws LeaderElectionException {
+        synchronized (this) {
+            if (!isInitialized) {
+                initializeImplementation();
+                isInitialized = true;
+            }
+        }
+    }
+    
+    
+    /**
+     * Check if it is initialized
+     *
+     * @return true if it is initialized
+     */
+    protected boolean isInitialized() {
+        return isInitialized;
+    }
+    
+    
+    /**
+     * @see com.github.toolarium.leader.election.LeaderElector#isLeader()
      */
     @Override
     public boolean isLeader() {
-        if ((isLeader != null) && isLeader.booleanValue()) {
-            LOG.debug("In lead of [" + getUniqueName() + "].");
-            return true;
-        }
-        
         if (isLeader != null) {
-            LOG.debug("New leader found for [" + getUniqueName() + "].");
+            if (isLeader.booleanValue()) {
+                //LOG.debug("In lead of [" + getUniqueName() + "]" + description);
+                return true;
+            }
+            
+            //LOG.debug("New leader found for [" + getUniqueName() + "]");
+            return false;
         }
-        
+
         return false;
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.LeaderElector#getLeaderElectorTimestamp()
+     */
+    @Override
+    public Instant getLeaderElectorTimestamp() {
+        return timestamp;
     }
 
     
     /**
-     * Initialize
-     * 
-     * @throws IOException in case of an i/o error
+     * @see com.github.toolarium.leader.election.LeaderElector#close()
      */
-    protected abstract void init() throws IOException;
+    @Override
+    public void close() {
+        if (isLeader != null && isLeader) {
+            LOG.debug("Release lead of [" + leaderElectionInformation.getUniqueName() + "]" + description);
+        }
 
+        LeaderElectionScheduler.getInstance().unregister(this);
+        isLeader = null;
+        description = null;
+        isInitialized = false;
+    }
+
+    
+    /**
+     * Initialise the leader elector.
+     * This has to be called before the first isLeader() call; otherwise it will be always false. 
+     * 
+     * @throws LeaderElectionException In case of an initialisation error
+     */
+    protected abstract void initializeImplementation() throws LeaderElectionException;
+        
     
     /**
      * Set the leader
@@ -77,43 +140,35 @@ public abstract class AbstractLeaderElectorImpl implements ILeaderElector {
      * @param inputDescription the description
      */
     protected void setLeader(final Boolean isLeader, final String inputDescription) {
-        final String description;
+        String newDescription;
         if (inputDescription != null) {
-            description = "(" + inputDescription + ")"; 
+            newDescription = " (" + inputDescription + ")."; 
         } else {
-            description = "";
+            newDescription = ".";
         }
         
         if (isLeader == null) {
+            // unset leader
             if (this.isLeader != null && this.isLeader) {
-                LOG.debug("Losed lead of [" + getUniqueName() + "].");
-            }            
+                LOG.debug("Losed lead of [" + leaderElectionInformation.getUniqueName() + "]" + newDescription);
+            }
+            
+            this.timestamp = null;
         } else if (isLeader.booleanValue()) {
+            // I'm the leader
             if (this.isLeader == null || !this.isLeader) {
-                LOG.debug("Get in lead of [" + getUniqueName() + "].");
+                LOG.debug("Get in lead of [" + leaderElectionInformation.getUniqueName() + "]" + newDescription);
+                this.timestamp = Instant.now();
             }
         } else {
-            if (this.isLeader == null) {
-                LOG.debug("New lead found for [" + getUniqueName() + "] " + description + ".");
-            } else if (this.isLeader) {
-                LOG.debug("New lead found for [" + getUniqueName() + "] " + description + ".");
-            }
-        }        
+            this.timestamp = null;
+        }
         
         this.isLeader = isLeader;
+        this.description = newDescription;
     }
 
 
-    /**
-     * Get the unique name
-     *
-     * @return the unique name
-     */
-    protected String getUniqueName() {
-        return uniqueName;
-    }
-    
-    
     /**
      * Get the leader election information
      *
@@ -129,7 +184,7 @@ public abstract class AbstractLeaderElectorImpl implements ILeaderElector {
      *
      * @return the leader election information
      */
-    protected LeaderElectionConfiguration getLeaderElectionConfiguration() {
+    protected T getLeaderElectionConfiguration() {
         return leaderElectionConfiguration;
     }
 }

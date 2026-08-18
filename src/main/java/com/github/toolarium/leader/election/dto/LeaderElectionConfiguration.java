@@ -21,11 +21,11 @@ public class LeaderElectionConfiguration {
     
     /**
      * Constructor for LeaderElectionConfiguration
-     * 
+     *
      * @throws IllegalArgumentException In case of a parameter failure
      */
     public LeaderElectionConfiguration() throws IllegalArgumentException {
-        this(10);
+        this(Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofSeconds(5));
     }
 
     
@@ -52,7 +52,7 @@ public class LeaderElectionConfiguration {
      * Constructor for LeaderElectionConfiguration
      *
      * @param timeout the timeout
-     * @param renewDeadline the ewnew deadline
+     * @param renewDeadline the rewnew deadline
      * @param retryPeriod the retry period
      * @throws IllegalArgumentException In case of a parameter failure
      */
@@ -66,12 +66,15 @@ public class LeaderElectionConfiguration {
 
 
     /**
-     * Validate 
+     * Validate
+     *  
      * @throws IllegalArgumentException In case of a parameter failure
      */
-    private void validate() throws IllegalArgumentException {
+    protected void validate() throws IllegalArgumentException {
         if (timeout == null || timeout.isZero()) {
             throw new IllegalArgumentException("Invalid timeout!");
+        } else if (timeout.toSeconds() < 0) {
+            throw new IllegalArgumentException("Too short timeout.");
         }
 
         if (renewDeadline == null || renewDeadline.isZero() || renewDeadline.toSeconds() >= timeout.toSeconds()) {

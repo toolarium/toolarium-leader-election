@@ -10,16 +10,68 @@ apply from: "https://raw.githubusercontent.com/toolarium/common-gradle-build/mas
  * Define project dependencies
  ****************************************************************************************/
 dependencies {
-    implementation 'org.jgroups:jgroups:5.3.7.Final'
+    // optional runtime dependencies (consumers must add these if they use the respective strategy)
+    compileOnly 'org.jgroups:jgroups:5.5.6.Final'
+    compileOnly 'io.kubernetes:client-java:27.0.0'
+    compileOnly 'io.kubernetes:client-java-extended:27.0.0'
 
-    implementation 'io.kubernetes:client-java:20.0.1'
-    implementation 'io.kubernetes:client-java-extended:20.0.1'
-        
-    testImplementation 'com.h2database:h2:2.2.224'
-        
+    testImplementation 'org.jgroups:jgroups:5.5.6.Final'
+    testImplementation 'io.kubernetes:client-java:27.0.0'
+    testImplementation 'io.kubernetes:client-java-extended:27.0.0'
+    testImplementation 'com.h2database:h2:2.4.240'
+
     // logging
     implementation "org.slf4j:slf4j-api:${commonGradleSlf4jApiVersion}"
     testRuntimeOnly "ch.qos.logback:logback-classic:${commonGradleLogbackVersion}"
-    
+
    // testRuntimeOnly "org.junit.platform:junit-platform-commons:1.7.0"
+}
+
+/****************************************************************************************
+ * Integration test source set (only compiled and run with -Pintegration)
+ ****************************************************************************************/
+if (project.hasProperty('integration')) {
+    sourceSets {
+        integrationTest {
+            java.srcDirs = ['src/integrationTest/java']
+            compileClasspath += sourceSets.test.compileClasspath + sourceSets.test.output
+            runtimeClasspath += sourceSets.test.runtimeClasspath + sourceSets.test.output
+        }
+    }
+
+    dependencies {
+        integrationTestImplementation 'org.testcontainers:testcontainers:1.21.4'
+        integrationTestImplementation 'org.testcontainers:junit-jupiter:1.21.4'
+        integrationTestImplementation 'org.testcontainers:k3s:1.21.4'
+        integrationTestImplementation 'org.testcontainers:postgresql:1.21.4'
+        integrationTestImplementation 'org.testcontainers:oracle-xe:1.21.4'
+        integrationTestImplementation 'org.testcontainers:mysql:1.21.4'
+        integrationTestImplementation 'org.testcontainers:mariadb:1.21.4'
+        integrationTestImplementation 'org.testcontainers:mssqlserver:1.21.4'
+        integrationTestImplementation 'org.postgresql:postgresql:42.7.13'
+        integrationTestImplementation 'com.oracle.database.jdbc:ojdbc11:23.26.3.0.0'
+        integrationTestImplementation 'com.mysql:mysql-connector-j:9.3.0'
+        integrationTestImplementation 'org.mariadb.jdbc:mariadb-java-client:3.5.3'
+        integrationTestImplementation 'com.microsoft.sqlserver:mssql-jdbc:12.10.0.jre11'
+    }
+
+    tasks.named('test') {
+        testClassesDirs += sourceSets.integrationTest.output.classesDirs
+        classpath += sourceSets.integrationTest.runtimeClasspath
+    }
+}
+
+/****************************************************************************************
+ * Pass testcontainers configuration to the test JVM
+ ****************************************************************************************/
+tasks.withType(Test).configureEach {
+    useJUnitPlatform {
+        if (!project.hasProperty('integration')) {
+            excludeTags 'integration'
+        }
+    }
+    if (project.hasProperty('integration') && project.ext.has('containerCmd') && project.ext.containerCmd == 'nerdctl') {
+        jvmArgs '-Dtc.host=npipe:////./pipe/docker_engine', '-Dryuk.disabled=true', '-Dapi.version=1.45'
+        environment 'DOCKER_HOST', 'npipe:////./pipe/docker_engine'
+    }
 }

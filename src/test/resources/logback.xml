@@ -30,6 +30,10 @@
   </appender>
 
   <!-- By default only local project logs in debug -->
+  <!--
+  <logger name="org.testcontainers" level="DEBUG"/>
+  <logger name="com.github.dockerjava" level="DEBUG"/>
+  -->
   <logger name="com.github" level="INFO"/>
   <!-- <logger name="org.jgroups" level="DEBUG"/> -->
   <!-- <logger name="io.kubernetes" level="DEBUG"/> -->
