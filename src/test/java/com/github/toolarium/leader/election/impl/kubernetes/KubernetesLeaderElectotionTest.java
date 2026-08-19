@@ -24,6 +24,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -47,6 +48,15 @@ public class KubernetesLeaderElectotionTest extends AbstractLeaderElectorTest {
     @BeforeEach
     public void setUp() {
         MockResourceLock.initialize();
+    }
+
+
+    /**
+     * Tear down the test — reset singleton state modified during tests.
+     */
+    @AfterEach
+    public void tearDown() {
+        KubernetesUtil.getInstance().setCheckEnvironmentVariables(true);
     }
 
 

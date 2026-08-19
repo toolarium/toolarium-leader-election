@@ -143,9 +143,9 @@ public final class LeaderElectionScheduler {
 
 
     /**
-     * Check if a thread with the given id is still alive.
+     * Check if the thread referenced is still alive.
      *
-     * @param threadId the thread id
+     * @param ref the weak reference to the thread
      * @return true if it is alive
      */
     private boolean isThreadAlive(WeakReference<Thread> ref) {

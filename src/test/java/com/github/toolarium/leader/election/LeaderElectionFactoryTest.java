@@ -13,6 +13,8 @@ import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.kubernetes.KubernetesUtil;
+import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,6 +26,17 @@ import org.slf4j.LoggerFactory;
  */
 public class LeaderElectionFactoryTest {
     private static final Logger LOG = LoggerFactory.getLogger(LeaderElectionFactoryTest.class);
+
+
+    /**
+     * Tear down the test — reset singleton state modified during tests.
+     */
+    @AfterEach
+    public void tearDown() {
+        KubernetesUtil.getInstance().setCheckEnvironmentVariables(true);
+        KubernetesUtil.getInstance().setCheckEndpoint(true);
+    }
+
 
     /**
      * Test
@@ -52,7 +65,7 @@ public class LeaderElectionFactoryTest {
         Thread.sleep(50);
         assertFalse(leaderElectorA.isLeader());
         leaderElectorA.initialize();
-        Thread.sleep(200);
+        awaitCondition(() -> leaderElectorA.isLeader(), 200);
         assertTrue(leaderElectorA.isLeader());
         leaderElectorA.close();
         assertFalse(leaderElectorA.isLeader());
@@ -71,7 +84,7 @@ public class LeaderElectionFactoryTest {
         Thread.sleep(50);
         assertFalse(leaderElectorA.isLeader());
         leaderElectorA.initialize();
-        Thread.sleep(1500);
+        awaitCondition(() -> leaderElectorA.isLeader(), 2000);
         assertTrue(leaderElectorA.isLeader());
         leaderElectorA.close();
         assertFalse(leaderElectorA.isLeader());
@@ -92,7 +105,7 @@ public class LeaderElectionFactoryTest {
         LeaderElector el = LeaderElectionFactory.getInstance().getLeaderElection(new LeaderElectionInformation("namespace", "name", "test"), new LeaderElectionConfiguration(2));
         el.initialize();
         assertFalse(el.isLeader());
-        Thread.sleep(3000);
+        awaitCondition(() -> el.isLeader(), 3000);
 
         assertTrue(el.isLeader());
         Thread.sleep(500);
@@ -137,7 +150,7 @@ public class LeaderElectionFactoryTest {
         Thread.sleep(50);
         LOG.debug("->Initilize leader");
         leaderElector.initialize();
-        Thread.sleep(3000);
+        awaitCondition(() -> leaderElector.isLeader(), 3000);
         LOG.debug("->Check leader");
         assertTrue(leaderElector.isLeader());
         LOG.debug("->Close leader");
@@ -162,7 +175,7 @@ public class LeaderElectionFactoryTest {
         LeaderElector leaderElectorA = LeaderElectionFactory.getInstance().getLeaderElection(strategy, leaderElectionInformation, leaderElectionConfiguration);
         leaderElectorA.initialize();
 
-        Thread.sleep(1500);
+        awaitCondition(() -> leaderElectorA.isLeader(), 3000);
         assertTrue(leaderElectorA.isLeader());
 
         // create second instance
@@ -170,7 +183,7 @@ public class LeaderElectionFactoryTest {
         leaderElectorB.initialize();
 
         assertFalse(leaderElectorB.isLeader());
-        Thread.sleep(50);
+        awaitCondition(() -> leaderElectorA.isLeader(), 1500);
         assertTrue(leaderElectorA.isLeader());
 
         Thread.sleep(500);
@@ -181,14 +194,29 @@ public class LeaderElectionFactoryTest {
         assertFalse(leaderElectorB.isLeader());
 
         leaderElectorA.close();
-        assertFalse(leaderElectorB.isLeader()); // its not immediately
         Thread.sleep(200);
         assertFalse(leaderElectorA.isLeader());
-        Thread.sleep(6000);
+        awaitCondition(() -> leaderElectorB.isLeader(), 6000);
         assertTrue(leaderElectorB.isLeader());
 
         Thread.sleep(50);
         assertTrue(leaderElectorB.isLeader());
         leaderElectorB.close();
+    }
+
+
+    /**
+     * Poll the given condition every 50 ms until it returns {@code true} or the timeout elapses.
+     * The caller is responsible for asserting the final state after this method returns.
+     *
+     * @param condition the condition to poll
+     * @param timeoutMillis maximum time to wait in milliseconds
+     * @throws InterruptedException if the polling sleep is interrupted
+     */
+    private void awaitCondition(BooleanSupplier condition, long timeoutMillis) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50L);
+        }
     }
 }

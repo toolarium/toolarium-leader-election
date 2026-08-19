@@ -31,11 +31,12 @@ public class OracleLeaderElectionTest extends AbstractDatabaseLeaderElectorTest 
 
     /**
      * @see com.github.toolarium.leader.election.AbstractLeaderElectorTest#getInitWaitMillis()
-     *     Oracle XE in Docker has ~1s DML latency; retryPeriod=5s means first tick completes in ~6s.
+     *     Oracle XE in Docker has cold-start JDBC connection overhead plus ~1s DML latency;
+     *     retryPeriod=5s means the first tick completes in ~6s after the connection is ready.
      */
     @Override
     protected long getInitWaitMillis() {
-        return 8000L;
+        return 15000L;
     }
 
 

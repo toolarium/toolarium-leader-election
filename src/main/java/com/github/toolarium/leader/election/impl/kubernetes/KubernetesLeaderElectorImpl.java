@@ -14,7 +14,6 @@ import io.kubernetes.client.extended.leaderelection.LeaderElectionConfig;
 import io.kubernetes.client.extended.leaderelection.Lock;
 import io.kubernetes.client.extended.leaderelection.resourcelock.EndpointsLock;
 import io.kubernetes.client.openapi.ApiClient;
-import io.kubernetes.client.openapi.Configuration;
 import io.kubernetes.client.util.Config;
 import java.io.IOException;
 import org.slf4j.Logger;
@@ -32,6 +31,7 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
     private Thread updateThread;
     private volatile boolean runThread;
     private final ApiClient preConfiguredClient;
+    private ApiClient resolvedClient;
 
 
     /**
@@ -55,6 +55,7 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
     public KubernetesLeaderElectorImpl(LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration, ApiClient apiClient) {
         super(leaderElectionInformation, leaderElectionConfiguration);
         this.preConfiguredClient = apiClient;
+        this.resolvedClient = null;
         leaderElector = null;
         updateThread = null;
         runThread = false;
@@ -70,12 +71,15 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
             LOG.debug("Initialize kubernetes api client...");
 
             try {
-                ApiClient client = (preConfiguredClient != null) ? preConfiguredClient : Config.defaultClient();
-                Configuration.setDefaultApiClient(client);
+                if (preConfiguredClient != null) {
+                    resolvedClient = preConfiguredClient;
+                } else {
+                    resolvedClient = Config.defaultClient();
+                }
             } catch (IOException e) {
                 throw new LeaderElectionException("Could not initialize the kubernetes api client: " + e.getMessage(), e);
             }
-    
+
             final Lock lock = createLock(getLeaderElectionInformation());
             leaderElector = new io.kubernetes.client.extended.leaderelection.LeaderElector(new LeaderElectionConfig(lock, getLeaderElectionConfiguration().getTimeout(), 
                                                                                            getLeaderElectionConfiguration().getRenewDeadline(), 
@@ -119,12 +123,12 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
 
     /**
      * Create the lock
-     * 
+     *
      * @param leaderElectionInformation the leader election information
      * @return the lock
      */
     protected Lock createLock(LeaderElectionInformation leaderElectionInformation) {
-        return new EndpointsLock(leaderElectionInformation.getNamespace(), leaderElectionInformation.getName(), leaderElectionInformation.getIdentity());
+        return new EndpointsLock(leaderElectionInformation.getNamespace(), leaderElectionInformation.getName(), leaderElectionInformation.getIdentity(), resolvedClient);
     }
 
 

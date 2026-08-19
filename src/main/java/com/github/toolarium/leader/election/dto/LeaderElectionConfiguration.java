@@ -81,7 +81,7 @@ public class LeaderElectionConfiguration {
             throw new IllegalArgumentException("Invalid renewDeadline. The renew deadline must be < timeout!");
         }
 
-        if (retryPeriod == null || retryPeriod.isZero() || renewDeadline.toSeconds() > retryPeriod.toSeconds()) {
+        if (retryPeriod == null || retryPeriod.isZero() || renewDeadline.toSeconds() < retryPeriod.toSeconds()) {
             throw new IllegalArgumentException("Invalid retryPeriod. The retry period must be < renewDeadline!");
         }
     }

@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory;
  */
 public final class FileLockFactory {
     private static final Logger LOG = LoggerFactory.getLogger(FileLockFactory.class);
+    private static final String LOG_SEP = "] [";
     private Map<FileLock, Long> fileLockMap;
     private ScheduledExecutorService scheduledExecuterService;
     private ScheduledFuture<?> scheduledFuture;
@@ -126,7 +127,7 @@ public final class FileLockFactory {
         try {
             fileLock.lock();
         } catch (FileLockException ex) {
-            LOG.warn("Could not acquire file lock [" + fileLock.getId() + "] [" + fileLock.getFile() + "]: " + ex.getMessage());
+            LOG.warn("Could not acquire file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "]: " + ex.getMessage());
         }
         return fileLock;
     }
@@ -175,16 +176,16 @@ public final class FileLockFactory {
                     if (fileLock.getRenewDeadline() != null) {
                         if (now - (lockTime + fileLock.getRenewDeadline().toMillis()) > 0) {
                             try {
-                                LOG.debug("Try to renew file lock [" + fileLock.getId() + "] [" + fileLock.getFile() + "].");
+                                LOG.debug("Try to renew file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "].");
                                 fileLock.renew();
                             } catch (FileLockException e) {
-                                LOG.debug("Losed file lock [" + fileLock.getId() + "] [" + fileLock.getFile() + "], could not be renewed: " + e.getMessage());
+                                LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], could not be renewed: " + e.getMessage());
                             }
                         }
                     } else if (fileLock.getLockPeriod() != null && (now - (lockTime + fileLock.getLockPeriod().toMillis()) > 0)
                             || !ThreadUtil.getInstance().isThreadAlive(fileLock.getThreadId())) /* || !fileLock.hasLock() ) */ {
                         if (fileLock.hasLock()) {
-                            LOG.debug("Losed file lock [" + fileLock.getId() + "] [" + fileLock.getFile() + "], timeout.");
+                            LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], timeout.");
                             release(fileLock);
                         }
                     } else {
@@ -248,12 +249,12 @@ public final class FileLockFactory {
             for (FileLock fileLock : fileLockMap.keySet()) {
                 try {
                     if (fileLock.hasLock()) {
-                        LOG.debug("Clean file lock [" + fileLock.getId() + "] [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + ".");
+                        LOG.debug("Clean file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + ".");
                     }
                     fileLock.close();
                     
                 } catch (Exception e) {
-                    LOG.warn("File lock [" + fileLock.getId() + "] [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
+                    LOG.warn("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
                 }
             }
         }

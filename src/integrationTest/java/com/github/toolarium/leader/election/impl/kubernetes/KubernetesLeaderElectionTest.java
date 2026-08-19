@@ -61,7 +61,7 @@ public class KubernetesLeaderElectionTest extends AbstractLeaderElectorTest {
         String identity = lockName + "-" + counter.incrementAndGet();
         return new KubernetesLeaderElectorImpl(
                 new LeaderElectionInformation("default", lockName, identity),
-                new LeaderElectionConfiguration(Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofSeconds(5)),
+                new LeaderElectionConfiguration(Duration.ofSeconds(10), Duration.ofSeconds(7), Duration.ofSeconds(5)),
                 apiClient);
     }
 

@@ -17,16 +17,19 @@ import org.junit.jupiter.api.Test;
  * @author patrick
  */
 public class LeaderElectionInformationTest {
+    private static final String NAMESPACE = "ns";
+    private static final String APP_NAME = "myapp";
+    private static final String NODE_1 = "node-1";
 
     /**
      * Test full constructor and getters.
      */
     @Test
     public void testFullConstructor() {
-        LeaderElectionInformation info = new LeaderElectionInformation("ns", "myapp", "node-1");
-        assertEquals("ns", info.getNamespace());
-        assertEquals("myapp", info.getName());
-        assertEquals("node-1", info.getIdentity());
+        LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
+        assertEquals(NAMESPACE, info.getNamespace());
+        assertEquals(APP_NAME, info.getName());
+        assertEquals(NODE_1, info.getIdentity());
     }
 
 
@@ -35,10 +38,10 @@ public class LeaderElectionInformationTest {
      */
     @Test
     public void testIdentityOnlyConstructor() {
-        LeaderElectionInformation info = new LeaderElectionInformation("node-1");
+        LeaderElectionInformation info = new LeaderElectionInformation(NODE_1);
         assertEquals("", info.getNamespace());
         assertEquals("", info.getName());
-        assertEquals("node-1", info.getIdentity());
+        assertEquals(NODE_1, info.getIdentity());
     }
 
 
@@ -47,7 +50,7 @@ public class LeaderElectionInformationTest {
      */
     @Test
     public void testGetUniqueNameAllFields() {
-        LeaderElectionInformation info = new LeaderElectionInformation("ns", "myapp", "node-1");
+        LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
         assertEquals("ns.myapp.node-1", info.getUniqueName());
     }
 
@@ -57,8 +60,8 @@ public class LeaderElectionInformationTest {
      */
     @Test
     public void testGetUniqueNameIdentityOnly() {
-        LeaderElectionInformation info = new LeaderElectionInformation("node-1");
-        assertEquals("node-1", info.getUniqueName());
+        LeaderElectionInformation info = new LeaderElectionInformation(NODE_1);
+        assertEquals(NODE_1, info.getUniqueName());
     }
 
 
@@ -67,7 +70,7 @@ public class LeaderElectionInformationTest {
      */
     @Test
     public void testGetUniqueNameNamespaceAndIdentity() {
-        LeaderElectionInformation info = new LeaderElectionInformation("ns", "", "node-1");
+        LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, "", NODE_1);
         assertEquals("ns.node-1", info.getUniqueName());
     }
 
@@ -77,7 +80,7 @@ public class LeaderElectionInformationTest {
      */
     @Test
     public void testGetUniqueNameNameAndIdentity() {
-        LeaderElectionInformation info = new LeaderElectionInformation("", "myapp", "node-1");
+        LeaderElectionInformation info = new LeaderElectionInformation("", APP_NAME, NODE_1);
         assertEquals("myapp.node-1", info.getUniqueName());
     }
 
@@ -87,7 +90,7 @@ public class LeaderElectionInformationTest {
      */
     @Test
     public void testSetters() {
-        LeaderElectionInformation info = new LeaderElectionInformation("ns", "myapp", "node-1");
+        LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
         info.setNamespace("ns2");
         info.setName("otherapp");
         info.setIdentity("node-2");
@@ -103,9 +106,9 @@ public class LeaderElectionInformationTest {
      */
     @Test
     public void testEqualsAndHashCode() {
-        LeaderElectionInformation a = new LeaderElectionInformation("ns", "myapp", "node-1");
-        LeaderElectionInformation b = new LeaderElectionInformation("ns", "myapp", "node-1");
-        LeaderElectionInformation c = new LeaderElectionInformation("ns", "myapp", "node-2");
+        LeaderElectionInformation a = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
+        LeaderElectionInformation b = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
+        LeaderElectionInformation c = new LeaderElectionInformation(NAMESPACE, APP_NAME, "node-2");
 
         assertEquals(a, b);
         assertEquals(a.hashCode(), b.hashCode());
@@ -121,7 +124,7 @@ public class LeaderElectionInformationTest {
      */
     @Test
     public void testToString() {
-        LeaderElectionInformation info = new LeaderElectionInformation("ns", "myapp", "node-1");
+        LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
         assertEquals("LeaderElectionInformation [namespace=ns, name=myapp, identity=node-1]", info.toString());
     }
 }

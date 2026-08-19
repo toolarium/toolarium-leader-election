@@ -88,12 +88,12 @@ public class LeaderElectionConfigurationTest {
 
 
     /**
-     * Test that renewDeadline > retryPeriod throws IllegalArgumentException.
+     * Test that retryPeriod > renewDeadline throws IllegalArgumentException.
      */
     @Test
-    public void testRenewDeadlineGreaterThanRetryPeriodThrows() {
+    public void testRetryPeriodGreaterThanRenewDeadlineThrows() {
         assertThrows(IllegalArgumentException.class, () ->
-            new LeaderElectionConfiguration(Duration.ofSeconds(10), Duration.ofSeconds(7), Duration.ofSeconds(5)));
+            new LeaderElectionConfiguration(Duration.ofSeconds(10), Duration.ofSeconds(3), Duration.ofSeconds(5)));
     }
 
 

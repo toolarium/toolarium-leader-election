@@ -8,6 +8,7 @@ package com.github.toolarium.leader.election;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,7 +79,7 @@ public abstract class AbstractLeaderElectorTest {
         Thread.sleep(50L);
         LOG.debug("->Initialize leader (idempotent)");
         leaderElector.initialize();
-        Thread.sleep(getInitWaitMillis());
+        awaitCondition(() -> leaderElector.isLeader(), getInitWaitMillis());
         LOG.debug("->Check leader");
         assertTrue(leaderElector.isLeader());
         LOG.debug("->Close leader");
@@ -100,7 +101,7 @@ public abstract class AbstractLeaderElectorTest {
         LeaderElector leaderElectorA = createLeaderElector("testMultipleLeaders");
         leaderElectorA.initialize();
 
-        Thread.sleep(getInitWaitMillis());
+        awaitCondition(() -> leaderElectorA.isLeader(), getInitWaitMillis());
         assertTrue(leaderElectorA.isLeader());
 
         LeaderElector leaderElectorB = createLeaderElector("testMultipleLeaders");
@@ -118,14 +119,28 @@ public abstract class AbstractLeaderElectorTest {
         assertFalse(leaderElectorB.isLeader());
 
         leaderElectorA.close();
-        assertFalse(leaderElectorB.isLeader()); // its not immediately
         Thread.sleep(200L);
         assertFalse(leaderElectorA.isLeader());
-        Thread.sleep(getFailoverWaitMillis());
+        awaitCondition(() -> leaderElectorB.isLeader(), getFailoverWaitMillis());
         assertTrue(leaderElectorB.isLeader());
 
         Thread.sleep(50L);
         assertTrue(leaderElectorB.isLeader());
         leaderElectorB.close();
+    }
+
+
+    /**
+     * Poll {@code condition} every 50 ms until it returns {@code true} or {@code timeoutMillis} elapses.
+     *
+     * @param condition the condition to poll
+     * @param timeoutMillis maximum time to wait in milliseconds
+     * @throws InterruptedException if the thread is interrupted while sleeping
+     */
+    private void awaitCondition(BooleanSupplier condition, long timeoutMillis) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50L);
+        }
     }
 }

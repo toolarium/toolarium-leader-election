@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 import org.jgroups.Address;
 import org.jgroups.Global;
 import org.jgroups.JChannel;
+import org.jgroups.Receiver;
 import org.jgroups.View;
 import org.jgroups.conf.ConfiguratorFactory;
 import org.jgroups.conf.ProtocolStackConfigurator;
@@ -142,8 +143,22 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
                 }
             }
 
-            channel.connect(uniqueName);
-            LOG.info("Connected to cluster [" + uniqueName + "] (" + channel.getAddress() + ").");
+            final JChannel ch = channel;
+            ch.setReceiver(new Receiver() {
+                /**
+                 * @see org.jgroups.MembershipListener#viewAccepted(org.jgroups.View)
+                 */
+                @Override
+                public void viewAccepted(View newView) {
+                    if (!isInitialized() || newView == null || newView.getMembers().isEmpty()) {
+                        return;
+                    }
+                    Address first = newView.getMembers().get(0);
+                    setLeader(first.equals(ch.getAddress()), "" + ch.getAddress());
+                }
+            });
+            ch.connect(uniqueName);
+            LOG.info("Connected to cluster [" + uniqueName + "] (" + ch.getAddress() + ").");
         } catch (Exception e) {
             LOG.warn("Could not join to network cluster [" + uniqueName + "]: " + e.getMessage(), e);
         }
