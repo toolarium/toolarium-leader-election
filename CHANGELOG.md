@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 1.0.0 - 2026-08-18
+## [ 1.0.1 ] - 2026-08-19
+
+## [ 1.0.0 ] - 2026-08-18
 ### Added
 - `LeaderElectionStrategy` enum with four strategies: `FILE`, `NETWORK`, `KUBERNETES`, `DATABASE`.
 - `FILE` strategy: OS-level file lock on a shared filesystem path (`FileLeaderElectorImpl`, `FileLock`, `FileLockFactory`). No extra dependency required.
@@ -24,6 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integration test for Kubernetes via Testcontainers k3s (`KubernetesLeaderElectionTest`): runs against a real k3s cluster with no mocking.
 - Unit tests for FILE, DATABASE, KUBERNETES, and NETWORK strategies.
 
-## 0.8.0 - 2021-12-23
+## [ 0.8.0 ] - 2021-12-23
 ### Changed
 - Setup initial version.
