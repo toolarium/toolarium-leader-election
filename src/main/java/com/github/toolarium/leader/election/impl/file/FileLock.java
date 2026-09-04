@@ -98,7 +98,9 @@ public class FileLock implements AutoCloseable {
      * @throws FileLockException In case the lock can not be acquired.
      */
     public void renew() throws FileLockException {
-        LOG.debug("Renew file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Renew file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
+        }
         unlock();
         lock();
     }
@@ -288,8 +290,10 @@ public class FileLock implements AutoCloseable {
             throw new FileLockException("Could not aquire the lock of the file " + file + ", invalid state.");
         }
 
-        this.isValid = true; 
-        LOG.debug("Created file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
+        this.isValid = true;
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Created file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
+        }
 
         if (fileLockListener != null) {
             fileLockListener.hasLock();
@@ -302,7 +306,9 @@ public class FileLock implements AutoCloseable {
      */
     public void unlock() {
         if (hasLock()) {
-            LOG.debug("Release file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Release file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
+            }
         }
         
         if (outputStream != null) {

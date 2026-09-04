@@ -5,14 +5,12 @@
  */
 package com.github.toolarium.leader.election.impl.database.dao;
 
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 import java.util.Objects;
 import java.util.UUID;
 
 /**
  * The leader elector record
- * 
+ *
  * @author patrick
  */
 public class LeaderElectorRecord {
@@ -20,7 +18,7 @@ public class LeaderElectorRecord {
     private String name;
     private String instance;
     private String user;
-    private String timestamp;
+    private long timestamp;
     
     
     /**
@@ -30,9 +28,9 @@ public class LeaderElectorRecord {
      * @param name the name
      * @param instance the instance
      * @param user the user
-     * @param timestamp the timestamp
+     * @param timestamp the timestamp as epoch milliseconds
      */
-    public LeaderElectorRecord(String id, String name, String instance, String user, String timestamp) {
+    public LeaderElectorRecord(String id, String name, String instance, String user, long timestamp) {
         this.id = id;
         this.name = name;
         this.instance = instance;
@@ -53,7 +51,7 @@ public class LeaderElectorRecord {
         this.name = name;
         this.instance = instance;
         this.user = user;
-        this.timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now()).substring(0, 24) + "Z";
+        this.timestamp = System.currentTimeMillis();
     }
 
     
@@ -98,11 +96,11 @@ public class LeaderElectorRecord {
     
     
     /**
-     * Get the timestamp
+     * Get the timestamp as epoch milliseconds
      *
      * @return the timestamp
      */
-    public String getTimestamp() {
+    public long getTimestamp() {
         return timestamp;
     }
 

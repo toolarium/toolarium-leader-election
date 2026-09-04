@@ -13,10 +13,13 @@ package com.github.toolarium.leader.election;
 public enum LeaderElectionStrategy {
     /** OS-level file lock on a shared filesystem path. */
     FILE,
+
     /** JDBC-based optimistic locking against a shared database table. */
     DATABASE,
+
     /** Network-based cluster membership leader election (jgroup). */
     NETWORK,
+    
     /** Kubernetes lease-based leader election. */
     KUBERNETES;
 }

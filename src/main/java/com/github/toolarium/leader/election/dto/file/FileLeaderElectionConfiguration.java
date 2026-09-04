@@ -3,8 +3,9 @@
  *
  * Copyright by toolarium, all rights reserved.
  */
-package com.github.toolarium.leader.election.dto;
+package com.github.toolarium.leader.election.dto.file;
 
+import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import java.io.File;
 import java.time.Duration;
 

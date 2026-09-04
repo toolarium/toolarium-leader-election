@@ -88,10 +88,14 @@ public final class JDBCUtil {
 
             try {
                 stmnt.close();
-                LOG.debug("Statement closed.");
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Statement closed.");
+                }
             } catch (SQLException e) {
                 // swallow exception. Since we're closing it we'll let it be dead.
-                LOG.debug("Could not close statement!");
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Could not close statement!");
+                }
             }
         }
     }
@@ -120,10 +124,14 @@ public final class JDBCUtil {
                 }
 
                 conn.close();
-                LOG.debug("Closed connection.");
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Closed connection.");
+                }
             } catch (SQLException e) {
                 // swallow exception. Since we're closing it we'll let it be dead.
-                LOG.debug("Could not close connection!");
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Could not close connection!");
+                }
             }
         }
     }    

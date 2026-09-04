@@ -5,8 +5,8 @@
  */
 package com.github.toolarium.leader.election.impl.database;
 
-import com.github.toolarium.leader.election.dto.DatabaseLeaderElectionConfiguration;
-import com.github.toolarium.leader.election.dto.JDBCLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure;
 import org.junit.jupiter.api.Tag;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;

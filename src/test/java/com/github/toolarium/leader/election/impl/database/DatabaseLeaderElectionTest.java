@@ -5,7 +5,7 @@
  */
 package com.github.toolarium.leader.election.impl.database;
 
-import com.github.toolarium.leader.election.dto.DatabaseLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import org.h2.jdbcx.JdbcDataSource;
 
 

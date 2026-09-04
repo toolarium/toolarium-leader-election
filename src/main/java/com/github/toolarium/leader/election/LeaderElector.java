@@ -33,8 +33,19 @@ public interface LeaderElector extends AutoCloseable {
 
     
     /**
+     * Close and release all resources held by this leader elector.
+     * Implementations may throw {@link LeaderElectionException} if cleanup cannot complete
+     * within the configured {@code closeTimeout}.
+     *
+     * @throws LeaderElectionException if the elector cannot be shut down cleanly in time
+     */
+    @Override
+    void close() throws LeaderElectionException;
+
+
+    /**
      * Is leader
-     * 
+     *
      * @return true if the caller is the elected leader otherwise false
      */
     boolean isLeader();

@@ -112,9 +112,11 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * @see com.github.toolarium.leader.election.LeaderElector#close()
      */
     @Override
-    public void close() {
+    public void close() throws LeaderElectionException {
         if (isLeader != null && isLeader) {
-            LOG.debug("Release lead of [" + leaderElectionInformation.getUniqueName() + "]" + description);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Release lead of [{}]{}", leaderElectionInformation.getUniqueName(), description);
+            }
         }
 
         LeaderElectionScheduler.getInstance().unregister(this);
@@ -150,14 +152,18 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         if (isLeader == null) {
             // unset leader
             if (this.isLeader != null && this.isLeader) {
-                LOG.debug("Losed lead of [" + leaderElectionInformation.getUniqueName() + "]" + newDescription);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Losed lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
+                }
             }
-            
+
             this.timestamp = null;
         } else if (isLeader.booleanValue()) {
             // I'm the leader
             if (this.isLeader == null || !this.isLeader) {
-                LOG.debug("Get in lead of [" + leaderElectionInformation.getUniqueName() + "]" + newDescription);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Get in lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
+                }
                 this.timestamp = Instant.now();
             }
         } else {

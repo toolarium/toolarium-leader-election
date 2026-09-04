@@ -6,8 +6,8 @@
 package com.github.toolarium.leader.election.impl.file;
 
 import com.github.toolarium.leader.election.LeaderElector;
-import com.github.toolarium.leader.election.dto.FileLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
+import com.github.toolarium.leader.election.dto.file.FileLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl;
 import java.io.File;
@@ -39,12 +39,9 @@ public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderE
      */
     @Override
     protected void initializeImplementation() throws LeaderElectionException {
-        String basePath = FileLeaderElectionConfiguration.createBasePath(null);
-        if (getLeaderElectionConfiguration() != null && getLeaderElectionConfiguration() instanceof FileLeaderElectionConfiguration) {
-            basePath = ((FileLeaderElectionConfiguration)getLeaderElectionConfiguration()).getBasePath(); 
-        }
-        
-        File file = new File(basePath + getLeaderElectionInformation().getUniqueName().replace('.', '.').trim() + ".lock");
+        FileLeaderElectionConfiguration.createBasePath(null);
+        String basePath = getLeaderElectionConfiguration().getBasePath();
+        File file = new File(basePath + getLeaderElectionInformation().getUniqueName().trim() + ".lock");
         fileLock = FileLockFactory.getInstance().tryLock(file, getLeaderElectionConfiguration().getTimeout(), getLeaderElectionConfiguration().getRenewDeadline());
         
         // in case we got the lock we set the listener
@@ -72,7 +69,7 @@ public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderE
      * @see com.github.toolarium.leader.election.LeaderElector#close()
      */
     @Override
-    public void close() {
+    public void close() throws LeaderElectionException {
         super.close();
         FileLockFactory.getInstance().release(fileLock);
         fileLock = null;

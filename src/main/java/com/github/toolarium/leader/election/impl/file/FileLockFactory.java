@@ -147,7 +147,10 @@ public final class FileLockFactory {
             fileLock.close();
             fileLockMap.remove(fileLock);
         } catch (Exception e) {
-            LOG.warn("File lock [" + fileLock.getId() + "]  [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("File lock [" + fileLock.getId() + "]  [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
+            }
+            LOG.warn("File lock [" + fileLock.getId() + "]  [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage());
         }
     }
 
@@ -162,10 +165,14 @@ public final class FileLockFactory {
          * @see java.lang.Runnable#run()
          */
         public void run() {
-            LOG.debug("Verify file locks...");
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Verify file locks...");
+            }
             try {
                 for (FileLock fileLock : fileLockMap.keySet()) {
-                    LOG.debug("Verify lock " + fileLock);
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Verify lock " + fileLock);
+                    }
                     long now = Instant.now().toEpochMilli();
                     
                     long lockTime = 0;
@@ -176,16 +183,22 @@ public final class FileLockFactory {
                     if (fileLock.getRenewDeadline() != null) {
                         if (now - (lockTime + fileLock.getRenewDeadline().toMillis()) > 0) {
                             try {
-                                LOG.debug("Try to renew file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "].");
+                                if (LOG.isDebugEnabled()) {
+                                    LOG.debug("Try to renew file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "].");
+                                }
                                 fileLock.renew();
                             } catch (FileLockException e) {
-                                LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], could not be renewed: " + e.getMessage());
+                                if (LOG.isDebugEnabled()) {
+                                    LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], could not be renewed: " + e.getMessage());
+                                }
                             }
                         }
                     } else if (fileLock.getLockPeriod() != null && (now - (lockTime + fileLock.getLockPeriod().toMillis()) > 0)
                             || !ThreadUtil.getInstance().isThreadAlive(fileLock.getThreadId())) /* || !fileLock.hasLock() ) */ {
                         if (fileLock.hasLock()) {
-                            LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], timeout.");
+                            if (LOG.isDebugEnabled()) {
+                                LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], timeout.");
+                            }
                             release(fileLock);
                         }
                     } else {
@@ -193,7 +206,10 @@ public final class FileLockFactory {
                     }
                 }
             } catch (Exception e) {
-                LOG.warn("Unexpeted exception: " + e.getMessage(), e);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Unexpeted exception: " + e.getMessage(), e);
+                }
+                LOG.warn("Unexpeted exception: " + e.getMessage());
             }
         }
     }
@@ -203,7 +219,9 @@ public final class FileLockFactory {
      * Start the schedule
      */
     private void startSchedule() {
-        LOG.debug("Start scheduler with interval of " + scheduleInterval + " seconds.");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Start scheduler with interval of " + scheduleInterval + " seconds.");
+        }
         scheduledExecuterService = Executors.newScheduledThreadPool(1);
         scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(new FileLockHandler(), 0, scheduleInterval, TimeUnit.SECONDS);
     }
@@ -237,7 +255,9 @@ public final class FileLockFactory {
             scheduledExecuterService = null;
         }
         
-        LOG.debug("Stopped the scheduler.");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Stopped the scheduler.");
+        }
     }
     
 
@@ -249,12 +269,17 @@ public final class FileLockFactory {
             for (FileLock fileLock : fileLockMap.keySet()) {
                 try {
                     if (fileLock.hasLock()) {
-                        LOG.debug("Clean file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + ".");
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("Clean file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + ".");
+                        }
                     }
                     fileLock.close();
                     
                 } catch (Exception e) {
-                    LOG.warn("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
+                    }
+                    LOG.warn("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage());
                 }
             }
         }

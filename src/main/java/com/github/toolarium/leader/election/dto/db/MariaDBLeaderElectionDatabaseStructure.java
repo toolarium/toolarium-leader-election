@@ -3,7 +3,7 @@
  *
  * Copyright by toolarium, all rights reserved.
  */
-package com.github.toolarium.leader.election.dto;
+package com.github.toolarium.leader.election.dto.db;
 
 
 /**

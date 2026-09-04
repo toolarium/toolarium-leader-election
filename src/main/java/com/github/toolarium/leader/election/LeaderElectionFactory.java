@@ -6,10 +6,10 @@
 
 package com.github.toolarium.leader.election;
 
-import com.github.toolarium.leader.election.dto.DatabaseLeaderElectionConfiguration;
-import com.github.toolarium.leader.election.dto.FileLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
+import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.dto.file.FileLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.LeaderElectionScheduler;
 import com.github.toolarium.leader.election.impl.database.DatabaseLeaderElectorImpl;
@@ -112,6 +112,7 @@ public final class LeaderElectionFactory {
             } else {
                 leaderElectionStrategy = LeaderElectionStrategy.NETWORK;
             }
+            LOG.info("Auto-selected leader election strategy: {}.", leaderElectionStrategy);
         }
 
         return selectLeaderElectorBasedOnStrategy(leaderElectionStrategy, leaderElectionInformation, leaderElectionConfiguration);

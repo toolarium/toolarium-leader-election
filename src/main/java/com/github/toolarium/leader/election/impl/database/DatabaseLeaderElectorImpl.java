@@ -6,14 +6,13 @@
 package com.github.toolarium.leader.election.impl.database;
 
 import com.github.toolarium.leader.election.LeaderElector;
-import com.github.toolarium.leader.election.dto.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
+import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl;
 import com.github.toolarium.leader.election.impl.database.dao.LeaderElectionDAO;
 import com.github.toolarium.leader.election.impl.database.dao.LeaderElectorRecord;
 import java.sql.SQLException;
-import java.time.Instant;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -30,11 +29,14 @@ import org.slf4j.LoggerFactory;
 public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<DatabaseLeaderElectionConfiguration> {
     private static final Logger LOG = LoggerFactory.getLogger(DatabaseLeaderElectorImpl.class);
     private static final int CONSECUTIVE_FAILURE_THRESHOLD = 3;
+    private static final long MAX_BACKOFF_MILLIS = 60_000L;
     private ScheduledExecutorService scheduledExecuterService;
     private ScheduledFuture<?> scheduledFuture;
     private LeaderElectionDAO leaderElectionDAO;
     private volatile String currentLeaderRecordId;
     private volatile int consecutiveFailures;
+    private volatile long backoffUntil;
+    private volatile boolean closing;
 
 
     /**
@@ -50,6 +52,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         this.leaderElectionDAO = new LeaderElectionDAO(getLeaderElectionConfiguration());
         this.currentLeaderRecordId = null;
         this.consecutiveFailures = 0;
+        this.backoffUntil = 0;
+        this.closing = false;
     }
 
 
@@ -58,17 +62,20 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      */
     @Override
     protected void initializeImplementation() throws LeaderElectionException {
+        LeaderElectionInformation info = getLeaderElectionInformation();
+        if ((info.getNamespace() == null || info.getNamespace().isBlank()) && (info.getName() == null || info.getName().isBlank())) {
+            LOG.warn("LeaderElectionInformation has no namespace or name set. Falling back to identity [{}] as the election group key. All nodes must use the same identity value to form a valid election group.", info.getIdentity());
+        }
 
         try {
             leaderElectionDAO.init();
-
         } catch (SQLException e) {
             throw new LeaderElectionException("Could not prepare database for leader election: " + e.getMessage(), e);
         }
 
         scheduledExecuterService = Executors.newScheduledThreadPool(1);
         scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(
-                new DatabaseElectionHandler(), 0, getLeaderElectionConfiguration().getRetryPeriod().getSeconds(), TimeUnit.SECONDS);
+                new DatabaseElectionHandler(), 0, getLeaderElectionConfiguration().getRetryPeriod().toMillis(), TimeUnit.MILLISECONDS);
     }
 
 
@@ -76,14 +83,18 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * @see com.github.toolarium.leader.election.LeaderElector#close()
      */
     @Override
-    public void close() {
-        // Delete own leader record before closing
+    public void close() throws LeaderElectionException {
+        closing = true;
+        // Delete own leader record before closing so another node can take over immediately.
         if (currentLeaderRecordId != null) {
             try {
                 leaderElectionDAO.deleteLeaderByNameAndId(
-                        getLeaderElectionInformation().getUniqueName(), currentLeaderRecordId);
+                        getLeaderElectionInformation().getElectionGroupName(), currentLeaderRecordId);
             } catch (Exception e) {
-                LOG.warn("Could not delete leader record on close: " + e.getMessage(), e);
+                LOG.warn("Could not delete leader record on close: {}", e.getMessage());
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Error detail:", e);
+                }
             }
             currentLeaderRecordId = null;
         }
@@ -122,14 +133,23 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
          * @see java.lang.Runnable#run()
          */
         public void run() {
-            String uniqueName = getLeaderElectionInformation().getUniqueName();
+            // Do not execute any more ticks after close() has been called.
+            if (closing) {
+                return;
+            }
+            // Exponential back-off: skip this tick if we are still within the back-off window.
+            if (System.currentTimeMillis() < backoffUntil) {
+                return;
+            }
+
+            String uniqueName = getLeaderElectionInformation().getElectionGroupName();
             String instanceId = getId();
 
             try {
                 LeaderElectorRecord currentLeader = leaderElectionDAO.selectLeaderByName(uniqueName);
 
                 if (currentLeader == null) {
-                    // No leader exists, try to become one
+                    // No leader exists — try to become one.
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, System.getProperty("user.name"));
                     int result = leaderElectionDAO.insertLeader(newRecord);
                     if (result > 0) {
@@ -137,7 +157,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         setLeader(true, null);
                     }
                 } else if (instanceId.equals(currentLeader.getInstance())) {
-                    // We are the leader, atomically renew the timestamp
+                    // We are the leader — atomically renew the lease.
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, System.getProperty("user.name"));
                     int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
                     if (result > 0) {
@@ -148,15 +168,20 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         setLeader(false, null);
                     }
                 } else {
-                    // Another instance is the leader, check if the lease has expired
-                    try {
-                        Instant leaderTimestamp = Instant.parse(currentLeader.getTimestamp());
-                        Instant expiry = leaderTimestamp.plus(getLeaderElectionConfiguration().getTimeout());
-                        if (Instant.now().isAfter(expiry)) {
-                            // Leader expired, try to steal leadership
-                            leaderElectionDAO.deleteLeaderByNameAndId(uniqueName, currentLeader.getId());
+                    // Another instance holds leadership — use a local-clock fast-path to avoid a DB
+                    // round-trip when the lease is clearly still valid.
+                    long timeout = getLeaderElectionConfiguration().getTimeout().toMillis();
+                    if (currentLeader.getTimestamp() >= System.currentTimeMillis() - timeout) {
+                        setLeader(false, null);
+                    } else {
+                        // Lease appears expired locally — verify using the DB clock to avoid false
+                        // expiry caused by node-clock skew.
+                        long dbNow = leaderElectionDAO.getDatabaseCurrentTimeMillis();
+                        long expiryThreshold = dbNow - timeout;
+                        if (currentLeader.getTimestamp() < expiryThreshold) {
+                            // Lease expired — atomically steal leadership via a single conditional UPDATE.
                             LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, System.getProperty("user.name"));
-                            int result = leaderElectionDAO.insertLeader(newRecord);
+                            int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, newRecord);
                             if (result > 0) {
                                 currentLeaderRecordId = newRecord.getId();
                                 setLeader(true, null);
@@ -166,18 +191,25 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         } else {
                             setLeader(false, null);
                         }
-                    } catch (Exception e) {
-                        setLeader(false, null);
                     }
                 }
                 consecutiveFailures = 0;
+                backoffUntil = 0;
             } catch (Exception e) {
                 consecutiveFailures++;
                 if (consecutiveFailures >= CONSECUTIVE_FAILURE_THRESHOLD) {
-                    LOG.error("Repeated failure (" + consecutiveFailures + ") verifying database cluster [" + uniqueName + "]: " + e.getMessage(), e);
+                    LOG.error("Repeated failure ({}) verifying database cluster [{}]: {}", consecutiveFailures, uniqueName, e.getMessage());
                 } else {
-                    LOG.warn("Error occured while verify database cluster [" + uniqueName + "]: " + e.getMessage(), e);
+                    LOG.warn("Error occured while verify database cluster [{}]: {}", uniqueName, e.getMessage());
                 }
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Error detail:", e);
+                }
+                
+                long retryPeriod = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
+                long exp = (long) Math.pow(2, Math.min(consecutiveFailures - 1, 5));
+                long backoffDelay = Math.min(retryPeriod * exp, MAX_BACKOFF_MILLIS);
+                backoffUntil = System.currentTimeMillis() + backoffDelay;
             }
         }
     }

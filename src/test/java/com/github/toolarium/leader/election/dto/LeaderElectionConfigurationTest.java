@@ -142,7 +142,34 @@ public class LeaderElectionConfigurationTest {
     public void testToString() {
         LeaderElectionConfiguration config = new LeaderElectionConfiguration(Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofSeconds(5));
         String s = config.toString();
-        assertEquals("LeaderElectionConfiguration [timeout=PT10S, renewDeadline=PT5S, retryPeriod=PT5S]", s);
+        assertEquals("LeaderElectionConfiguration [timeout=PT10S, renewDeadline=PT5S, retryPeriod=PT5S, closeTimeout=PT5S]", s);
+    }
+
+
+    /**
+     * Test that setCloseTimeout(null) throws IllegalArgumentException.
+     */
+    @Test
+    public void testSetCloseTimeoutNullThrows() {
+        LeaderElectionConfiguration config = new LeaderElectionConfiguration();
+        assertThrows(IllegalArgumentException.class, () -> config.setCloseTimeout(null));
+    }
+
+
+    /**
+     * Test that two configurations with the same timeout/renewDeadline/retryPeriod but different
+     * closeTimeout values are NOT equal and have different hash codes.
+     */
+    @Test
+    public void testEqualsWithDifferentCloseTimeout() {
+        LeaderElectionConfiguration a = new LeaderElectionConfiguration(
+                Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofSeconds(5));
+        LeaderElectionConfiguration b = new LeaderElectionConfiguration(
+                Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofSeconds(5));
+        b.setCloseTimeout(Duration.ofSeconds(30));
+        assertNotEquals(a, b, "Configurations with different closeTimeout must not be equal");
+        assertNotEquals(a.hashCode(), b.hashCode(),
+                "Hash codes must differ for configurations with different closeTimeout");
     }
 
 

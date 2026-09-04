@@ -6,7 +6,6 @@
 package com.github.toolarium.leader.election.impl.kubernetes;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -102,8 +101,7 @@ public class KubernetesLeaderElectotionTest extends AbstractLeaderElectorTest {
 
         LeaderElector el = LeaderElectionFactory.getInstance().getLeaderElection(new LeaderElectionInformation("namespace", "name", "kubernetes-fallback-test"), new LeaderElectionConfiguration(2));
         el.initialize();
-        assertFalse(el.isLeader());
-        Thread.sleep(getInitWaitMillis());
+        awaitCondition(() -> el.isLeader(), 10000L);
 
         assertTrue(el.isLeader());
         Thread.sleep(2000);

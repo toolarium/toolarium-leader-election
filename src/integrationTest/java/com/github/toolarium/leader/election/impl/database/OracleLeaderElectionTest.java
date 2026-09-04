@@ -5,8 +5,8 @@
  */
 package com.github.toolarium.leader.election.impl.database;
 
-import com.github.toolarium.leader.election.dto.DatabaseLeaderElectionConfiguration;
-import com.github.toolarium.leader.election.dto.OracleLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.dto.db.OracleLeaderElectionDatabaseStructure;
 import java.sql.SQLException;
 import java.time.Duration;
 import oracle.jdbc.pool.OracleDataSource;
@@ -47,6 +47,37 @@ public class OracleLeaderElectionTest extends AbstractDatabaseLeaderElectorTest 
     @Override
     protected long getFailoverWaitMillis() {
         return 10000L;
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.impl.database.AbstractDatabaseLeaderElectorTest#legacyTableDDL(String)
+     *     Oracle uses VARCHAR2 and NUMBER(19). The {@code timestamp} column is left unquoted so
+     *     Oracle stores it as uppercase {@code TIMESTAMP}, which matches the rename SQL that also
+     *     uses uppercase {@code TIMESTAMP}.
+     */
+    @Override
+    protected String legacyTableDDL(String tableName) {
+        String base = tableName.toLowerCase();
+        String suffix = base.length() > 27 ? base.substring(0, 27) : base;
+        return "CREATE TABLE " + tableName
+                + "(id VARCHAR2(36) NOT NULL, name VARCHAR2(512) NOT NULL, "
+                + "instance VARCHAR2(255), username VARCHAR2(255), timestamp NUMBER(19) NOT NULL, "
+                + "CONSTRAINT pk_" + suffix + " PRIMARY KEY (name))";
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.impl.database.AbstractDatabaseLeaderElectorTest#mismatchedTableDDL(String)
+     *     Oracle requires VARCHAR2 instead of varchar.
+     */
+    @Override
+    protected String mismatchedTableDDL(String tableName) {
+        String base = tableName.toLowerCase();
+        String suffix = base.length() > 27 ? base.substring(0, 27) : base;
+        return "CREATE TABLE " + tableName
+                + "(id VARCHAR2(36) NOT NULL, name VARCHAR2(512) NOT NULL, "
+                + "junk VARCHAR2(255), CONSTRAINT pk_" + suffix + " PRIMARY KEY (name))";
     }
 
 

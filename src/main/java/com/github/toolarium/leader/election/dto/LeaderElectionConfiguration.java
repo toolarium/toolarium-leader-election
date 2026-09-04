@@ -17,6 +17,7 @@ public class LeaderElectionConfiguration {
     private Duration timeout;
     private Duration renewDeadline;
     private Duration retryPeriod;
+    private Duration closeTimeout;
 
     
     /**
@@ -42,7 +43,7 @@ public class LeaderElectionConfiguration {
         if (renewDeadline.toSeconds() <= retryPeriod.toSeconds()) {
             this.renewDeadline = renewDeadline.plus(renewDeadline.dividedBy(2));
         }
-        
+        this.closeTimeout = Duration.ofSeconds(5);
         validate();
     }
 
@@ -60,7 +61,7 @@ public class LeaderElectionConfiguration {
         this.timeout = timeout;
         this.renewDeadline = renewDeadline;
         this.retryPeriod = retryPeriod;
-        
+        this.closeTimeout = Duration.ofSeconds(5);
         validate();
     }
 
@@ -101,9 +102,11 @@ public class LeaderElectionConfiguration {
      * Set the timeout
      *
      * @param timeout the timeout
+     * @return this configuration instance for method chaining
      */
-    public void setTimeout(Duration timeout) {
+    public LeaderElectionConfiguration setTimeout(Duration timeout) {
         this.timeout = timeout;
+        return this;
     }
 
     
@@ -121,9 +124,11 @@ public class LeaderElectionConfiguration {
      * Set the renew deadline
      *
      * @param renewDeadline the renew deadline
+     * @return this configuration instance for method chaining
      */
-    public void setRenewDeadline(Duration renewDeadline) {
+    public LeaderElectionConfiguration setRenewDeadline(Duration renewDeadline) {
         this.renewDeadline = renewDeadline;
+        return this;
     }
 
     
@@ -141,9 +146,38 @@ public class LeaderElectionConfiguration {
      * Set the retry period
      *
      * @param retryPeriod the retry period
+     * @return this configuration instance for method chaining
      */
-    public void setRetryPeriod(Duration retryPeriod) {
+    public LeaderElectionConfiguration setRetryPeriod(Duration retryPeriod) {
         this.retryPeriod = retryPeriod;
+        return this;
+    }
+
+
+    /**
+     * Get the close timeout, maximum time to wait for background threads or connections to terminate cleanly 
+     * during {@link com.github.toolarium.leader.election.LeaderElector#close()}.Defaults to 5 seconds.
+     *
+     * @return the close timeout
+     */
+    public Duration getCloseTimeout() {
+        return closeTimeout;
+    }
+
+
+    /**
+     * Set the close timeout.
+     *
+     * @param closeTimeout the close timeout; must be a positive, non-null duration
+     * @return this configuration instance for method chaining
+     * @throws IllegalArgumentException if closeTimeout is null
+     */
+    public LeaderElectionConfiguration setCloseTimeout(Duration closeTimeout) {
+        if (closeTimeout == null) {
+            throw new IllegalArgumentException("closeTimeout must not be null.");
+        }
+        this.closeTimeout = closeTimeout;
+        return this;
     }
 
 
@@ -152,7 +186,7 @@ public class LeaderElectionConfiguration {
      */
     @Override
     public int hashCode() {
-        return Objects.hash(retryPeriod, renewDeadline, timeout);
+        return Objects.hash(retryPeriod, renewDeadline, timeout, closeTimeout);
     }
 
 
@@ -174,7 +208,7 @@ public class LeaderElectionConfiguration {
         }
         
         LeaderElectionConfiguration other = (LeaderElectionConfiguration) obj;
-        return Objects.equals(retryPeriod, other.retryPeriod) && Objects.equals(renewDeadline, other.renewDeadline) && Objects.equals(timeout, other.timeout);
+        return Objects.equals(retryPeriod, other.retryPeriod) && Objects.equals(renewDeadline, other.renewDeadline) && Objects.equals(timeout, other.timeout) && Objects.equals(closeTimeout, other.closeTimeout);
     }
 
 
@@ -183,6 +217,6 @@ public class LeaderElectionConfiguration {
      */
     @Override
     public String toString() {
-        return "LeaderElectionConfiguration [timeout=" + timeout + ", renewDeadline=" + renewDeadline + ", retryPeriod=" + retryPeriod + "]";
+        return "LeaderElectionConfiguration [timeout=" + timeout + ", renewDeadline=" + renewDeadline + ", retryPeriod=" + retryPeriod + ", closeTimeout=" + closeTimeout + "]";
     }
 }

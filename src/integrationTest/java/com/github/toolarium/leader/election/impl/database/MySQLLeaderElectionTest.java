@@ -5,8 +5,8 @@
  */
 package com.github.toolarium.leader.election.impl.database;
 
-import com.github.toolarium.leader.election.dto.DatabaseLeaderElectionConfiguration;
-import com.github.toolarium.leader.election.dto.MySQLLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.dto.db.MySQLLeaderElectionDatabaseStructure;
 import com.mysql.cj.jdbc.MysqlDataSource;
 import org.junit.jupiter.api.Tag;
 import org.testcontainers.containers.MySQLContainer;
@@ -25,6 +25,20 @@ public class MySQLLeaderElectionTest extends AbstractDatabaseLeaderElectorTest {
 
     @Container
     private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
+
+
+    /**
+     * @see com.github.toolarium.leader.election.impl.database.AbstractDatabaseLeaderElectorTest#legacyTableDDL(String)
+     *     MySQL treats {@code timestamp} as a reserved word requiring backtick quoting.
+     *     ROW_FORMAT=DYNAMIC is needed for the varchar(512) primary key.
+     */
+    @Override
+    protected String legacyTableDDL(String tableName) {
+        return "CREATE TABLE " + tableName
+                + "(id varchar(36) NOT NULL, name varchar(512) NOT NULL, "
+                + "instance varchar(255), username varchar(255), `timestamp` bigint NOT NULL, "
+                + "CONSTRAINT pk_" + tableName.toLowerCase() + " PRIMARY KEY (name)) ROW_FORMAT=DYNAMIC";
+    }
 
 
     /**

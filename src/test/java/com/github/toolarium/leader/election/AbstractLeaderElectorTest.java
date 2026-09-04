@@ -137,7 +137,7 @@ public abstract class AbstractLeaderElectorTest {
      * @param timeoutMillis maximum time to wait in milliseconds
      * @throws InterruptedException if the thread is interrupted while sleeping
      */
-    private void awaitCondition(BooleanSupplier condition, long timeoutMillis) throws InterruptedException {
+    protected void awaitCondition(BooleanSupplier condition, long timeoutMillis) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMillis;
         while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
             Thread.sleep(50L);

@@ -107,9 +107,13 @@ public final class KubernetesUtil {
                 lock.get();
                 return true;
             } catch (ApiException e) {
-                LOG.debug("Could not connect to kubernetes (http-code [" + e.getCode() + "]): " + e.getMessage());
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Could not connect to kubernetes (http-code [" + e.getCode() + "]): " + e.getMessage());
+                }
             } catch (Exception e) {
-                LOG.debug("Could not connect to kubernetes: " + e.getMessage());
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Could not connect to kubernetes: " + e.getMessage());
+                }
             }
             return false;
         });
@@ -117,10 +121,14 @@ public final class KubernetesUtil {
         try {
             return future.get(5, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
-            LOG.debug("Kubernetes endpoint check timed out.");
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Kubernetes endpoint check timed out.");
+            }
             future.cancel(true);
         } catch (Exception e) {
-            LOG.debug("Kubernetes endpoint check failed: " + e.getMessage());
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Kubernetes endpoint check failed: " + e.getMessage());
+            }
         } finally {
             executor.shutdownNow();
         }

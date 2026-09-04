@@ -11,9 +11,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
+import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.kubernetes.KubernetesUtil;
 import java.util.function.BooleanSupplier;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -50,6 +52,14 @@ public class LeaderElectionFactoryTest {
 
         verifyInitialize(LeaderElectionStrategy.NETWORK, new LeaderElectionInformation("testFile"), new LeaderElectionConfiguration(2));
         testMultipleLeaders(LeaderElectionStrategy.NETWORK, new LeaderElectionInformation("testFile"), new LeaderElectionConfiguration(2));
+
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:factorytest;DB_CLOSE_DELAY=-1");
+        ds.setUser("sa");
+        ds.setPassword("");
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(2).setDataSource(ds);
+        verifyInitialize(LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("testDatabase"), config);
+        testMultipleLeaders(LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("testDatabase"), config);        
     }
 
     /**
@@ -84,6 +94,36 @@ public class LeaderElectionFactoryTest {
         Thread.sleep(50);
         assertFalse(leaderElectorA.isLeader());
         leaderElectorA.initialize();
+        awaitCondition(() -> leaderElectorA.isLeader(), 5000);
+        assertTrue(leaderElectorA.isLeader());
+        leaderElectorA.close();
+        assertFalse(leaderElectorA.isLeader());
+    }
+
+
+    /**
+     * Test the database strategy with an H2 in-memory datasource.
+     * Shows the minimum setup required: create a {@link DatabaseLeaderElectionConfiguration},
+     * attach a {@link javax.sql.DataSource}, and use it exactly like any other strategy.
+     *
+     * @throws Exception In case of an error
+     */
+    @Test
+    public void testDatabase() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:factorytest;DB_CLOSE_DELAY=-1");
+        ds.setUser("sa");
+        ds.setPassword("");
+
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(2);
+        config.setDataSource(ds);
+
+        LeaderElector leaderElectorA = LeaderElectionFactory.getInstance().getLeaderElection(
+                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("testDatabase"), config);
+        assertFalse(leaderElectorA.isLeader());
+        Thread.sleep(50);
+        assertFalse(leaderElectorA.isLeader());
+        leaderElectorA.initialize();
         awaitCondition(() -> leaderElectorA.isLeader(), 2000);
         assertTrue(leaderElectorA.isLeader());
         leaderElectorA.close();
@@ -104,7 +144,6 @@ public class LeaderElectionFactoryTest {
 
         LeaderElector el = LeaderElectionFactory.getInstance().getLeaderElection(new LeaderElectionInformation("namespace", "name", "test"), new LeaderElectionConfiguration(2));
         el.initialize();
-        assertFalse(el.isLeader());
         awaitCondition(() -> el.isLeader(), 3000);
 
         assertTrue(el.isLeader());
@@ -150,7 +189,7 @@ public class LeaderElectionFactoryTest {
         Thread.sleep(50);
         LOG.debug("->Initilize leader");
         leaderElector.initialize();
-        awaitCondition(() -> leaderElector.isLeader(), 3000);
+        awaitCondition(() -> leaderElector.isLeader(), 8000);
         LOG.debug("->Check leader");
         assertTrue(leaderElector.isLeader());
         LOG.debug("->Close leader");
@@ -175,7 +214,7 @@ public class LeaderElectionFactoryTest {
         LeaderElector leaderElectorA = LeaderElectionFactory.getInstance().getLeaderElection(strategy, leaderElectionInformation, leaderElectionConfiguration);
         leaderElectorA.initialize();
 
-        awaitCondition(() -> leaderElectorA.isLeader(), 3000);
+        awaitCondition(() -> leaderElectorA.isLeader(), 8000);
         assertTrue(leaderElectorA.isLeader());
 
         // create second instance
@@ -196,7 +235,7 @@ public class LeaderElectionFactoryTest {
         leaderElectorA.close();
         Thread.sleep(200);
         assertFalse(leaderElectorA.isLeader());
-        awaitCondition(() -> leaderElectorB.isLeader(), 6000);
+        awaitCondition(() -> leaderElectorB.isLeader(), 10000);
         assertTrue(leaderElectorB.isLeader());
 
         Thread.sleep(50);

@@ -120,6 +120,48 @@ public class LeaderElectionInformationTest {
 
 
     /**
+     * Test getElectionGroupName with all fields set — identity is excluded from the key so that
+     * all per-node identities compete for the same database row.
+     */
+    @Test
+    public void testGetElectionGroupNameAllFields() {
+        LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
+        assertEquals("ns.myapp", info.getElectionGroupName());
+    }
+
+
+    /**
+     * Test getElectionGroupName with identity only — falls back to identity so that the
+     * single-argument constructor continues to work as the election group key.
+     */
+    @Test
+    public void testGetElectionGroupNameIdentityOnly() {
+        LeaderElectionInformation info = new LeaderElectionInformation(NODE_1);
+        assertEquals(NODE_1, info.getElectionGroupName());
+    }
+
+
+    /**
+     * Test getElectionGroupName with namespace and name only (no identity).
+     */
+    @Test
+    public void testGetElectionGroupNameNamespaceAndName() {
+        LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, APP_NAME, "");
+        assertEquals("ns.myapp", info.getElectionGroupName());
+    }
+
+
+    /**
+     * Test getElectionGroupName with namespace only.
+     */
+    @Test
+    public void testGetElectionGroupNameNamespaceOnly() {
+        LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, "", "");
+        assertEquals(NAMESPACE, info.getElectionGroupName());
+    }
+
+
+    /**
      * Test toString.
      */
     @Test

@@ -60,14 +60,25 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
      */
     @Override
     protected void initializeImplementation() throws LeaderElectionException {
-        LOG.debug("Initialize network channel...");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Initialize network channel...");
+        }
 
         channel = createChannel();
-        if (channel != null) {
-            scheduledExecuterService = Executors.newScheduledThreadPool(1);
-            scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(
-                    new NetworkLeaderElectionHandler(channel), 0, getLeaderElectionConfiguration().getRetryPeriod().getSeconds(), TimeUnit.SECONDS);
+        if (channel == null) {
+            throw new LeaderElectionException("Could not join network cluster [" + getLeaderElectionInformation().getUniqueName() + "]. Check previous log warnings for details.");
         }
+
+        // ch.connect() fires viewAccepted() synchronously, but the receiver guard (!isInitialized()) drops that initial event because isInitialized is still
+        // false here. Apply the established view directly so leadership is resolved before initialize() returns, without waiting for the first scheduler tick.
+        View initialView = channel.getView();
+        if (initialView != null && !initialView.getMembers().isEmpty()) {
+            Address first = initialView.getMembers().get(0);
+            setLeader(first.equals(channel.getAddress()), "" + channel.getAddress());
+        }
+
+        scheduledExecuterService = Executors.newScheduledThreadPool(1);
+        scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(new NetworkLeaderElectionHandler(channel), 0, getLeaderElectionConfiguration().getRetryPeriod().toMillis(), TimeUnit.MILLISECONDS);
     }
 
 
@@ -75,16 +86,12 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
      * @see com.github.toolarium.leader.election.LeaderElector#close()
      */
     @Override
-    public void close() {
+    public void close() throws LeaderElectionException {
         super.close();
 
-        if (channel != null) {
-            String channelName = "";
-            if (channel.getAddress() != null) {
-                channelName = "(" + channel.getAddress() + ")";
-            }
-
-            LOG.info("Exited from cluster [" + getLeaderElectionInformation().getUniqueName() + "] " + channelName + ".");
+        String channelName = "";
+        if (channel != null && channel.getAddress() != null) {
+            channelName = "(" + channel.getAddress() + ")";
         }
 
         if (scheduledFuture != null) {
@@ -112,6 +119,7 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
                 // NOP
             }
             channel = null;
+            LOG.info("Exited from cluster [{}] {}.", getLeaderElectionInformation().getUniqueName(), channelName);
         }
     }
 
@@ -158,9 +166,12 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
                 }
             });
             ch.connect(uniqueName);
-            LOG.info("Connected to cluster [" + uniqueName + "] (" + ch.getAddress() + ").");
+            LOG.info("Connected to cluster [{}] ({}).", uniqueName, ch.getAddress());
         } catch (Exception e) {
-            LOG.warn("Could not join to network cluster [" + uniqueName + "]: " + e.getMessage(), e);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Could not join to network cluster [{}]: {}", uniqueName, e.getMessage(), e);
+            }
+            LOG.warn("Could not join to network cluster [{}]: {}", uniqueName, e.getMessage());
         }
 
         return channel;
@@ -198,7 +209,10 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
                 Address address = view.getMembers().get(0);
                 setLeader(address.equals(channel.getAddress()), "" + channel.getAddress());
             } catch (Exception e) {
-                LOG.warn("Error occured while verify network cluster [" + getLeaderElectionInformation().getUniqueName() + "]: " + e.getMessage(), e);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Error occured while verify network cluster [{}]: {}", getLeaderElectionInformation().getUniqueName(), e.getMessage(), e);
+                }
+                LOG.warn("Error occured while verify network cluster [{}]: {}", getLeaderElectionInformation().getUniqueName(), e.getMessage());
             }
         }
     }

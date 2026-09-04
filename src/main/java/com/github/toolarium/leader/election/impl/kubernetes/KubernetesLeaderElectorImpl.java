@@ -67,57 +67,63 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
      */
     @Override
     protected void initializeImplementation() throws LeaderElectionException {
-        if (!isInitialized()) {
+        if (LOG.isDebugEnabled()) {
             LOG.debug("Initialize kubernetes api client...");
+        }
 
-            try {
-                if (preConfiguredClient != null) {
-                    resolvedClient = preConfiguredClient;
-                } else {
-                    resolvedClient = Config.defaultClient();
-                }
-            } catch (IOException e) {
-                throw new LeaderElectionException("Could not initialize the kubernetes api client: " + e.getMessage(), e);
+        try {
+            if (preConfiguredClient != null) {
+                resolvedClient = preConfiguredClient;
+            } else {
+                resolvedClient = Config.defaultClient();
             }
+        } catch (IOException e) {
+            throw new LeaderElectionException("Could not initialize the kubernetes api client: " + e.getMessage(), e);
+        }
 
-            final Lock lock = createLock(getLeaderElectionInformation());
-            leaderElector = new io.kubernetes.client.extended.leaderelection.LeaderElector(new LeaderElectionConfig(lock, getLeaderElectionConfiguration().getTimeout(), 
-                                                                                           getLeaderElectionConfiguration().getRenewDeadline(), 
-                                                                                           getLeaderElectionConfiguration().getRetryPeriod()));
-            
-            updateThread = new Thread(KubernetesLeaderElectorImpl.class.getName() + ": Update thread") { 
-                /**
-                 * @see java.lang.Thread#run()
-                 */
-                @Override
-                public void run() {
-                    while (runThread && !Thread.currentThread().isInterrupted()) {
-                        leaderElector.run(() -> {
+        final Lock lock = createLock(getLeaderElectionInformation());
+        leaderElector = new io.kubernetes.client.extended.leaderelection.LeaderElector(new LeaderElectionConfig(lock, getLeaderElectionConfiguration().getTimeout(),
+                                                                                       getLeaderElectionConfiguration().getRenewDeadline(),
+                                                                                       getLeaderElectionConfiguration().getRetryPeriod()));
+
+        updateThread = new Thread(KubernetesLeaderElectorImpl.class.getName() + ": Update thread") {
+            /**
+             * @see java.lang.Thread#run()
+             */
+            @Override
+            public void run() {
+                while (runThread && !Thread.currentThread().isInterrupted()) {
+                    leaderElector.run(() -> {
+                        if (LOG.isDebugEnabled()) {
                             LOG.debug("LEAD");
-                            setLeader(true, null);
-                        }, () -> {
+                        }
+                        setLeader(true, null);
+                    }, () -> {
+                        if (LOG.isDebugEnabled()) {
                             LOG.debug("NO LEAD");
-                            setLeader(false, null);
-                        });
-                        if (runThread && !Thread.currentThread().isInterrupted()) {
-                            try {
-                                Thread.sleep(getLeaderElectionConfiguration().getRetryPeriod().toMillis());
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                            }
+                        }
+                        setLeader(false, null);
+                    });
+                    if (runThread && !Thread.currentThread().isInterrupted()) {
+                        try {
+                            Thread.sleep(getLeaderElectionConfiguration().getRetryPeriod().toMillis());
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
                         }
                     }
-                    
-                    runThread = false;
+                }
+
+                runThread = false;
+                if (LOG.isDebugEnabled()) {
                     LOG.debug(KubernetesLeaderElectorImpl.class.getName() + " thread stopped successful.");
                 }
-            };
-            
-            runThread = true;
-            updateThread.setDaemon(true);
-            updateThread.setName(KubernetesLeaderElectorImpl.class.getName() + ": Update thread");
-            updateThread.start();
-        }
+            }
+        };
+
+        runThread = true;
+        updateThread.setDaemon(true);
+        updateThread.setName(KubernetesLeaderElectorImpl.class.getName() + ": Update thread");
+        updateThread.start();
     }
 
 
@@ -136,7 +142,7 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
      * @see com.github.toolarium.leader.election.LeaderElector#close()
      */
     @Override
-    public void close() {
+    public void close() throws LeaderElectionException {
         super.close();
 
         runThread = false;
@@ -144,7 +150,7 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
         updateThread = null;
 
         if (leaderElector != null) {
-            LOG.info("Exited from [" + getLeaderElectionInformation().getUniqueName() + "].");
+            LOG.info("Exited from [{}].", getLeaderElectionInformation().getUniqueName());
 
             try {
                 leaderElector.close();
@@ -156,11 +162,18 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
         leaderElector = null;
 
         if (thread != null) {
+            long closeTimeoutMillis = getLeaderElectionConfiguration().getCloseTimeout().toMillis();
             thread.interrupt();
             try {
-                thread.join(5000);
+                thread.join(closeTimeoutMillis);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            }
+            if (thread.isAlive()) {
+                throw new LeaderElectionException(
+                        "Kubernetes leader elector thread [" + thread.getName() + "] did not terminate within "
+                        + closeTimeoutMillis + " ms. Increase closeTimeout in LeaderElectionConfiguration "
+                        + "or investigate why the Kubernetes client is not responding to close().");
             }
         }
     }

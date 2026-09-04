@@ -56,9 +56,11 @@ public class LeaderElectionInformation {
      * Set the namespace
      *
      * @param namespace the namespace
+     * @return this instance for method chaining
      */
-    public void setNamespace(String namespace) {
+    public LeaderElectionInformation setNamespace(String namespace) {
         this.namespace = namespace;
+        return this;
     }
     
     
@@ -76,9 +78,11 @@ public class LeaderElectionInformation {
      * Set the name
      *
      * @param name the name
+     * @return this instance for method chaining
      */
-    public void setName(String name) {
+    public LeaderElectionInformation setName(String name) {
         this.name = name;
+        return this;
     }
     
     
@@ -96,9 +100,11 @@ public class LeaderElectionInformation {
      * Set the identity
      *
      * @param identity the identity
+     * @return this instance for method chaining
      */
-    public void setIdentity(String identity) {
+    public LeaderElectionInformation setIdentity(String identity) {
         this.identity = identity;
+        return this;
     }
 
 
@@ -134,8 +140,38 @@ public class LeaderElectionInformation {
 
     
     /**
+     * Get the election group name for the DATABASE strategy.
+     * Returns {@code namespace.name} (without identity), so that all nodes competing for the same
+     * resource share one database row regardless of their per-node identity value.
+     * Falls back to {@code identity} when both namespace and name are blank, preserving the
+     * single-argument constructor behaviour.
+     *
+     * @return the election group name
+     */
+    public String getElectionGroupName() {
+        String clusterName = "";
+        if (getNamespace() != null && !getNamespace().isBlank()) {
+            clusterName = getNamespace();
+        }
+
+        if (getName() != null && !getName().isBlank()) {
+            if (!clusterName.isEmpty()) {
+                clusterName += ".";
+            }
+            clusterName += getName();
+        }
+
+        if (clusterName.isEmpty() && getIdentity() != null && !getIdentity().isBlank()) {
+            clusterName = getIdentity();
+        }
+
+        return clusterName;
+    }
+
+
+    /**
      * Get the unique name
-     * 
+     *
      * @return the unique name
      */
     public String getUniqueName() {
