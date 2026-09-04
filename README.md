@@ -1,5 +1,5 @@
 [![License](https://img.shields.io/github/license/toolarium/toolarium-leader-election)](https://github.com/toolarium/toolarium-leader-election/blob/master/LICENSE)
-[![Maven Central](https://img.shields.io/maven-central/v/com.github.toolarium/toolarium-leader-election/1.0.0)](https://search.maven.org/artifact/com.github.toolarium/toolarium-leader-election/1.0.0/jar)
+[![Maven Central](https://img.shields.io/maven-central/v/com.github.toolarium/toolarium-leader-election/1.1.0)](https://search.maven.org/artifact/com.github.toolarium/toolarium-leader-election/1.1.0/jar)
 [![javadoc](https://javadoc.io/badge2/com.github.toolarium/toolarium-leader-election/javadoc.svg)](https://javadoc.io/doc/com.github.toolarium/toolarium-leader-election)
 
 # toolarium-leader-election
@@ -23,7 +23,7 @@ When no strategy is specified, the factory auto-detects: it uses **KUBERNETES** 
 
 **Gradle**
 ```gradle
-implementation 'com.github.toolarium:toolarium-leader-election:1.0.0'
+implementation 'com.github.toolarium:toolarium-leader-election:1.1.0'
 ```
 
 **Maven**
@@ -31,7 +31,7 @@ implementation 'com.github.toolarium:toolarium-leader-election:1.0.0'
 <dependency>
     <groupId>com.github.toolarium</groupId>
     <artifactId>toolarium-leader-election</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
 </dependency>
 ```
 
