@@ -13,7 +13,7 @@ import java.util.Objects;
  * 
  * @author patrick
  */
-public class LeaderElectionConfiguration {
+public class LeaderElectionConfiguration implements ILeaderElectionConfiguration {
     private Duration timeout;
     private Duration renewDeadline;
     private Duration retryPeriod;
@@ -156,7 +156,7 @@ public class LeaderElectionConfiguration {
 
     /**
      * Get the close timeout, maximum time to wait for background threads or connections to terminate cleanly 
-     * during {@link com.github.toolarium.leader.election.LeaderElector#close()}.Defaults to 5 seconds.
+     * during {@link com.github.toolarium.leader.election.ILeaderElector#close()}. Defaults to 5 seconds.
      *
      * @return the close timeout
      */

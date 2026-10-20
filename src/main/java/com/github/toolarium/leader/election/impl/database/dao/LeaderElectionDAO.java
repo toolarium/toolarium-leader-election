@@ -7,6 +7,11 @@ package com.github.toolarium.leader.election.impl.database.dao;
 
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.MariaDBLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.MySQLLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.OracleLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.SQLServerLeaderElectionDatabaseStructure;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -15,7 +20,10 @@ import java.sql.SQLException;
 import java.sql.SQLIntegrityConstraintViolationException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,7 +39,7 @@ import org.slf4j.LoggerFactory;
 public class LeaderElectionDAO {
     private static final Logger LOG = LoggerFactory.getLogger(LeaderElectionDAO.class);
     private final DatabaseLeaderElectionConfiguration leaderElectionConfiguration;
-    private final LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
+    private LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
 
 
     /**
@@ -54,6 +62,8 @@ public class LeaderElectionDAO {
      */
     public void init() throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection()) {
+            ensureStructure(conn);
+
             if (!existDatabaseTable(conn)) {
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Creating leader election table {}...", leaderElectionDatabaseStructure.getTableName());
@@ -93,6 +103,46 @@ public class LeaderElectionDAO {
      */
     public void close() {
         // Connections are borrowed per-operation; nothing to release here.
+    }
+
+
+    /**
+     * Ensure the database structure is initialized, detecting it from the connection if null.
+     *
+     * @param conn an active database connection
+     * @throws SQLException in case of a database error
+     */
+    private void ensureStructure(Connection conn) throws SQLException {
+        if (leaderElectionDatabaseStructure == null) {
+            String productName = conn.getMetaData().getDatabaseProductName();
+            leaderElectionDatabaseStructure = detectDatabaseStructure(productName);
+            leaderElectionConfiguration.setLeaderElectionDatabaseStructure(leaderElectionDatabaseStructure);
+            LOG.info("Auto-detected database structure: {} for '{}'.",
+                    leaderElectionDatabaseStructure.getClass().getSimpleName(), productName);
+        }
+    }
+
+
+    /**
+     * Select the appropriate database structure based on the JDBC product name.
+     * MariaDB is checked before MySQL because some MariaDB connectors may include
+     * "MySQL" in the product name string.
+     *
+     * @param productName the value returned by {@link DatabaseMetaData#getDatabaseProductName()}
+     * @return the matching {@link LeaderElectionDatabaseStructure}
+     */
+    private LeaderElectionDatabaseStructure detectDatabaseStructure(String productName) {
+        String p = productName.toLowerCase(Locale.ROOT);
+        if (p.contains("oracle")) {
+            return new OracleLeaderElectionDatabaseStructure();
+        } else if (p.contains("mariadb")) {
+            return new MariaDBLeaderElectionDatabaseStructure();
+        } else if (p.contains("mysql")) {
+            return new MySQLLeaderElectionDatabaseStructure();
+        } else if (p.contains("sql server")) {
+            return new SQLServerLeaderElectionDatabaseStructure();
+        }
+        return new JDBCLeaderElectionDatabaseStructure();
     }
 
 
@@ -141,17 +191,36 @@ public class LeaderElectionDAO {
 
 
     /**
-     * Delete a leader by name and id.
+     * Delete the leader record for the given stable instance id, regardless of election group name.
+     * Used by the administration API to force-release a remote leader in a single round-trip.
+     *
+     * @param instanceId the stable elector instance id
+     * @return the number of deleted records (0 if not found, 1 if found and deleted)
+     * @throws SQLException In case of a database error
+     */
+    public int deleteLeaderByInstance(String instanceId) throws SQLException {
+        try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
+             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByInstance())) {
+            JDBCUtil.getInstance().setValues(stmt, new Object[] {instanceId});
+            return stmt.executeUpdate();
+        }
+    }
+
+
+    /**
+     * Delete a leader by name and instance. Uses the stable elector instance identifier
+     * so the delete succeeds even when a concurrent scheduler tick has already renewed
+     * the per-renewal {@code id} column.
      *
      * @param name the name
-     * @param id the id
+     * @param instanceId the stable elector instance id
      * @return the number of deleted records
      * @throws SQLException In case of a database error
      */
-    public int deleteLeaderByNameAndId(String name, String id) throws SQLException {
+    public int deleteLeaderByNameAndInstance(String name, String instanceId) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByNameAndId())) {
-            JDBCUtil.getInstance().setValues(stmt, new Object[] {name, id});
+            PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByNameAndInstance())) {
+            JDBCUtil.getInstance().setValues(stmt, new Object[] {name, instanceId});
             return stmt.executeUpdate();
         }
     }
@@ -188,6 +257,37 @@ public class LeaderElectionDAO {
             }
         }
         return null;
+    }
+
+
+    /**
+     * Select all stored leader election records (one row per election group).
+     * Each row represents the current leader for that election group, from any node.
+     *
+     * @return list of all leader records; never {@code null}, may be empty
+     * @throws SQLException In case of a database error
+     */
+    public List<LeaderElectorRecord> selectAll() throws SQLException {
+        List<LeaderElectorRecord> result = new ArrayList<>();
+        try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection()) {
+            ensureStructure(conn);
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectAll())) {
+                while (rs.next()) {
+                    Object[] columns = JDBCUtil.getInstance().getValues(rs);
+                    long leaseTs;
+                    if (columns[4] instanceof Number) {
+                        leaseTs = ((Number) columns[4]).longValue();
+                    } else {
+                        leaseTs = Long.parseLong(columns[4].toString());
+                    }
+                    result.add(new LeaderElectorRecord(
+                        (String) columns[0], (String) columns[1],
+                        (String) columns[2], (String) columns[3], leaseTs));
+                }
+            }
+        }
+        return result;
     }
 
 
@@ -243,13 +343,15 @@ public class LeaderElectionDAO {
      * @throws SQLException In case of a database error
      */
     public long getDatabaseCurrentTimeMillis() throws SQLException {
-        try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectCurrentTimestampMillis())) {
-            if (rs.next()) {
-                Timestamp ts = rs.getTimestamp(1);
-                if (ts != null) {
-                    return ts.getTime();
+        try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection()) {
+            ensureStructure(conn);
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectCurrentTimestampMillis())) {
+                if (rs.next()) {
+                    Timestamp ts = rs.getTimestamp(1);
+                    if (ts != null) {
+                        return ts.getTime();
+                    }
                 }
             }
         }

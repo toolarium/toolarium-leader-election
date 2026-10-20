@@ -7,7 +7,6 @@ package com.github.toolarium.leader.election.dto;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -46,16 +45,17 @@ public class DatabaseStructureTest {
 
         assertTrue(s.createSQLTable().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLTable().endsWith(SEMICOLON));
-        assertTrue(s.createSQLIndex().contains(DEFAULT_TABLE));
-        assertTrue(s.createSQLIndex().endsWith(SEMICOLON));
+        assertNull(s.createSQLIndex());
         assertTrue(s.createSQLDropTable().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLDropTable().endsWith(SEMICOLON));
         assertTrue(s.createSQLInsertLeader().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLInsertLeader().endsWith(SEMICOLON));
         assertTrue(s.createSQLDeleteLeaderByName().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLDeleteLeaderByName().endsWith(SEMICOLON));
-        assertTrue(s.createSQLDeleteLeaderByNameAndId().contains(DEFAULT_TABLE));
-        assertTrue(s.createSQLDeleteLeaderByNameAndId().endsWith(SEMICOLON));
+        assertTrue(s.createSQLDeleteLeaderByNameAndInstance().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLDeleteLeaderByInstance().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLDeleteLeaderByInstance().endsWith(SEMICOLON));
+        assertTrue(s.createSQLDeleteLeaderByNameAndInstance().endsWith(SEMICOLON));
         assertTrue(s.createSQLSelectLeaderByName().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLSelectLeaderByName().endsWith(SEMICOLON));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
@@ -70,6 +70,9 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLRenameTimestampColumn().contains("timestamp"));
         assertTrue(s.createSQLRenameTimestampColumn().contains(LEASE_TS_COL));
         assertTrue(s.createSQLRenameTimestampColumn().endsWith(SEMICOLON));
+        assertTrue(s.createSQLSelectAll().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLSelectAll().contains(LEASE_TS_COL));
+        assertTrue(s.createSQLSelectAll().endsWith(SEMICOLON));
     }
 
 
@@ -84,13 +87,16 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLTable().contains("varchar(36)"));
         assertTrue(s.createSQLTable().contains("bigint"));
         assertTrue(!s.createSQLTable().endsWith(SEMICOLON));
-        assertTrue(s.createSQLIndex().contains(DEFAULT_TABLE));
+        assertNull(s.createSQLIndex());
         assertTrue(s.createSQLDropTable().contains(DEFAULT_TABLE));
         assertTrue(!s.createSQLDropTable().endsWith(SEMICOLON));
         assertTrue(s.createSQLInsertLeader().contains(DEFAULT_TABLE));
         assertTrue(!s.createSQLInsertLeader().endsWith(SEMICOLON));
         assertTrue(s.createSQLDeleteLeaderByName().contains("WHERE name = ?"));
-        assertTrue(s.createSQLDeleteLeaderByNameAndId().contains("WHERE name = ? AND id = ?"));
+        assertTrue(s.createSQLDeleteLeaderByNameAndInstance().contains("WHERE name = ? AND instance = ?"));
+        assertTrue(s.createSQLDeleteLeaderByInstance().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLDeleteLeaderByInstance().contains("WHERE instance = ?"));
+        assertTrue(!s.createSQLDeleteLeaderByInstance().endsWith(SEMICOLON));
         assertTrue(s.createSQLSelectLeaderByName().contains("SELECT id, name"));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains("WHERE name = ? AND instance = ?"));
@@ -106,6 +112,9 @@ public class DatabaseStructureTest {
         assertTrue(!s.createSQLRenameTimestampColumn().endsWith(SEMICOLON));
         // Standard RENAME COLUMN syntax (no backtick, no sp_rename)
         assertTrue(s.createSQLRenameTimestampColumn().toUpperCase().contains("RENAME COLUMN"));
+        assertTrue(s.createSQLSelectAll().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLSelectAll().contains(LEASE_TS_COL));
+        assertTrue(!s.createSQLSelectAll().endsWith(SEMICOLON));
     }
 
 
@@ -204,15 +213,20 @@ public class DatabaseStructureTest {
 
 
     /**
-     * Test that the default structure installed by validate() is JDBCLeaderElectionDatabaseStructure
-     * (no trailing semicolons), not the base class which emits semicolons and fails on most JDBC drivers.
+     * Test that the database structure is null by default (auto-detected on first connection),
+     * and that JDBCLeaderElectionDatabaseStructure — the auto-detected default for generic JDBC databases —
+     * does not emit trailing semicolons that would fail on most JDBC drivers.
      */
     @Test
     public void testDefaultConfigurationUsesJdbcStructureWithoutSemicolons() {
+        // Structure is null until the DAO connects and auto-detects the dialect
         DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration();
-        DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure s = config.getLeaderElectionDatabaseStructure();
-        assertInstanceOf(JDBCLeaderElectionDatabaseStructure.class, s,
-                "Default structure must be JDBCLeaderElectionDatabaseStructure, not the semicolon-emitting base class");
+        assertNull(config.getLeaderElectionDatabaseStructure(),
+                "Structure must be null before first connection (auto-detected by the DAO on init)");
+
+        // Verify JDBCLeaderElectionDatabaseStructure — the fallback auto-detected for H2/PostgreSQL/ANSI-SQL —
+        // does not emit trailing semicolons (the base class does, which breaks most JDBC drivers)
+        JDBCLeaderElectionDatabaseStructure s = new JDBCLeaderElectionDatabaseStructure();
         assertTrue(!s.createSQLTable().endsWith(SEMICOLON), "Default SQL must not end with semicolon");
         assertTrue(!s.createSQLInsertLeader().endsWith(SEMICOLON), "Default SQL must not end with semicolon");
     }
@@ -241,15 +255,17 @@ public class DatabaseStructureTest {
         s.setTableName(CUSTOM_TABLE);
 
         assertTrue(s.createSQLTable().contains(CUSTOM_TABLE));
-        assertTrue(s.createSQLIndex().contains(CUSTOM_TABLE));
+        assertNull(s.createSQLIndex());
         assertTrue(s.createSQLDropTable().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLInsertLeader().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLDeleteLeaderByName().contains(CUSTOM_TABLE));
-        assertTrue(s.createSQLDeleteLeaderByNameAndId().contains(CUSTOM_TABLE));
+        assertTrue(s.createSQLDeleteLeaderByNameAndInstance().contains(CUSTOM_TABLE));
+        assertTrue(s.createSQLDeleteLeaderByInstance().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLSelectLeaderByName().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLStealLeadership().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLRenameTimestampColumn().contains(CUSTOM_TABLE));
+        assertTrue(s.createSQLSelectAll().contains(CUSTOM_TABLE));
     }
 
 

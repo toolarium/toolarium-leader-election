@@ -10,10 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.toolarium.leader.election.AbstractLeaderElectorTest;
-import com.github.toolarium.leader.election.LeaderElectionFactory;
-import com.github.toolarium.leader.election.LeaderElector;
-import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
-import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
+import com.github.toolarium.leader.election.ILeaderElector;
 import io.kubernetes.client.extended.leaderelection.LeaderElectionConfig;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -81,10 +78,12 @@ public class KubernetesLeaderElectotionTest extends AbstractLeaderElectorTest {
      * @see com.github.toolarium.leader.election.AbstractLeaderElectorTest#createLeaderElector(java.lang.String)
      */
     @Override
-    protected LeaderElector createLeaderElector(String name) throws Exception {
+    protected ILeaderElector createLeaderElector(String name) throws Exception {
         String identity = name + "-" + counter.incrementAndGet();
-        return MockKubernetesLeaderElector.getInstance().getLeaderElection(
-                new LeaderElectionInformation("namespace", "name", identity), new LeaderElectionConfiguration(2));
+        return MockKubernetesLeaderElector.builder()
+                .namespace("namespace").name("name").identity(identity)
+                .timeout(Duration.ofSeconds(2))
+                .build();
     }
 
 
@@ -95,13 +94,11 @@ public class KubernetesLeaderElectotionTest extends AbstractLeaderElectorTest {
      */
     @Test
     public void testKubernetes() throws Exception {
-
-        KubernetesUtil.getInstance().setCheckEnvironmentVariables(false);
-        //KubernetesUtil.getInstance().setCheckEndpoint(false);
-
-        LeaderElector el = LeaderElectionFactory.getInstance().getLeaderElection(new LeaderElectionInformation("namespace", "name", "kubernetes-fallback-test"), new LeaderElectionConfiguration(2));
-        el.initialize();
-        awaitCondition(() -> el.isLeader(), 10000L);
+        ILeaderElector el = MockKubernetesLeaderElector.builder()
+                .namespace("namespace").name("name").identity("kubernetes-test")
+                .timeout(Duration.ofSeconds(2))
+                .build();
+        assertTrue(el.elect(Duration.ofMillis(getInitWaitMillis())));
 
         assertTrue(el.isLeader());
         Thread.sleep(2000);

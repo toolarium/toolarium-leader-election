@@ -5,7 +5,7 @@
  */
 package com.github.toolarium.leader.election.impl.kubernetes;
 
-import com.github.toolarium.leader.election.LeaderElector;
+import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
@@ -21,7 +21,7 @@ import org.slf4j.LoggerFactory;
 
 
 /**
- * Implements the {@link LeaderElector} based on kubernetes api.
+ * Implements the {@link ILeaderElector} based on kubernetes api.
  * 
  * @author patrick
  */
@@ -139,42 +139,47 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
 
 
     /**
-     * @see com.github.toolarium.leader.election.LeaderElector#close()
+     * @see com.github.toolarium.leader.election.ILeaderElector#close()
      */
     @Override
     public void close() throws LeaderElectionException {
-        super.close();
-
         runThread = false;
         final Thread thread = updateThread;
         updateThread = null;
 
         if (leaderElector != null) {
             LOG.info("Exited from [{}].", getLeaderElectionInformation().getUniqueName());
-
             try {
                 leaderElector.close();
             } catch (Exception e) {
                 // NOP
             }
         }
-
         leaderElector = null;
 
-        if (thread != null) {
-            long closeTimeoutMillis = getLeaderElectionConfiguration().getCloseTimeout().toMillis();
-            thread.interrupt();
-            try {
-                thread.join(closeTimeoutMillis);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        // Join the update thread inside a finally block so it is always cleaned up
+        // even when super.close() throws.
+        long closeTimeoutMillis = getLeaderElectionConfiguration().getCloseTimeout().toMillis();
+        boolean threadStillAlive = false;
+        try {
+            super.close();
+        } finally {
+            if (thread != null) {
+                thread.interrupt();
+                try {
+                    thread.join(closeTimeoutMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                threadStillAlive = thread.isAlive();
             }
-            if (thread.isAlive()) {
-                throw new LeaderElectionException(
-                        "Kubernetes leader elector thread [" + thread.getName() + "] did not terminate within "
-                        + closeTimeoutMillis + " ms. Increase closeTimeout in LeaderElectionConfiguration "
-                        + "or investigate why the Kubernetes client is not responding to close().");
-            }
+        }
+
+        if (threadStillAlive) {
+            throw new LeaderElectionException(
+                    "Kubernetes leader elector thread [" + thread.getName() + "] did not terminate within "
+                    + closeTimeoutMillis + " ms. Increase closeTimeout in LeaderElectionConfiguration "
+                    + "or investigate why the Kubernetes client is not responding to close().");
         }
     }
 }

@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [ 1.1.1 ] - 2026-09-04
+## [ 1.2.0 ] - 2026-10-20
+### Added
+- **Administration API** — `ILeaderElectionAdministration`: obtain a live snapshot of all electors currently holding leadership via `getElectors()` and force-release a specific leader lease via `forceRelease(String id)`. Access the singleton via `LeaderElectionFactory.getInstance().getLeaderElectionAdministration()`.
+- **`ILeaderElectorView`** — read-only view of an active leader: unique id, election group information, configuration, and the instant leadership was last confirmed. Returned by `getElectors()` and implemented by all elector instances.
+- **DATABASE cross-node visibility** — `getElectors()` returns leaders held by all nodes in the cluster, not only those running in this JVM; records are read directly from the shared database table. `forceRelease()` on a remote DATABASE leader deletes its row so another node can take over without waiting for the lease timeout.
+- `runIfLeader(String, ILeaderTask)` and `runIfLeader(String, Runnable)`: execute work on the calling thread only when this node holds leadership. The task is interrupted automatically when leadership is lost.
+- `ILeaderLease` interface: gives a running task read-only access to leadership state (`isValid()`, `verify()`), elector identity, configuration, and lease timing (`getLeaderSince()`, `getRemainingLeadTime()`, `isExpiringSoon(Duration)`).
+- `MockKubernetesLeaderElector.builder()`: fluent builder for constructing mock Kubernetes electors in tests, consistent with `LeaderElectionFactory.builder()`.
+
+### Changed
+- **Breaking API change**: `void initialize()` replaced by `boolean elect()` and `boolean elect(Duration timeout)`. `elect()` blocks until the first result is known and returns `isLeader()` directly; calling it again returns the current state immediately.
+- Strategy selection is now always explicit — `LeaderElectionFactory` requires a strategy and will throw if none is provided. The previous auto-detection fallback (Kubernetes → Network) has been removed.
+- DATABASE strategy: dialect-specific SQL structure is auto-detected from the JDBC connection on first use when none is configured explicitly.
+- README: updated all usage examples and the API reference table.
 
 ## [ 1.1.0 ] - 2026-09-04
 ### Added

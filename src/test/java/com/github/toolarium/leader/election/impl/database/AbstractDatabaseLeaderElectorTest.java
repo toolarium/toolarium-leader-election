@@ -11,10 +11,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.toolarium.leader.election.AbstractLeaderElectorTest;
+import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.LeaderElectionFactory;
-import com.github.toolarium.leader.election.LeaderElectionStrategy;
-import com.github.toolarium.leader.election.LeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
+import com.github.toolarium.leader.election.dto.LeaderElectionStrategy;
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.impl.database.dao.LeaderElectionDAO;
@@ -48,7 +48,7 @@ public abstract class AbstractDatabaseLeaderElectorTest extends AbstractLeaderEl
      * @see com.github.toolarium.leader.election.AbstractLeaderElectorTest#createLeaderElector(java.lang.String)
      */
     @Override
-    protected LeaderElector createLeaderElector(String name) throws Exception {
+    protected ILeaderElector createLeaderElector(String name) throws Exception {
         return LeaderElectionFactory.getInstance().getLeaderElection(
                 LeaderElectionStrategy.DATABASE, new LeaderElectionInformation(name), createConfiguration());
     }

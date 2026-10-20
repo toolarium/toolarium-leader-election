@@ -5,7 +5,7 @@
  */
 package com.github.toolarium.leader.election.impl.network;
 
-import com.github.toolarium.leader.election.LeaderElector;
+import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
@@ -30,7 +30,7 @@ import org.slf4j.LoggerFactory;
 
 
 /**
- * Implements the {@link LeaderElector} based on network.
+ * Implements the {@link ILeaderElector} based on network.
  *
  * @author patrick
  */
@@ -71,10 +71,16 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
 
         // ch.connect() fires viewAccepted() synchronously, but the receiver guard (!isInitialized()) drops that initial event because isInitialized is still
         // false here. Apply the established view directly so leadership is resolved before initialize() returns, without waiting for the first scheduler tick.
+        // Only signal "I am leader" synchronously: if this node is first in the initial view it can lead immediately.
+        // "Not leader" is NOT signalled here — phantom members from prior tests can appear first in the initial view and would
+        // prematurely count down the election latch with false. The scheduler (initialDelay=0) handles the "not leader" case
+        // after the first tick, by which time transient phantom members will have been detected as failed and removed.
         View initialView = channel.getView();
         if (initialView != null && !initialView.getMembers().isEmpty()) {
             Address first = initialView.getMembers().get(0);
-            setLeader(first.equals(channel.getAddress()), "" + channel.getAddress());
+            if (first.equals(channel.getAddress())) {
+                setLeader(true, "" + channel.getAddress());
+            }
         }
 
         scheduledExecuterService = Executors.newScheduledThreadPool(1);
@@ -83,20 +89,16 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
 
 
     /**
-     * @see com.github.toolarium.leader.election.LeaderElector#close()
+     * @see com.github.toolarium.leader.election.ILeaderElector#close()
      */
     @Override
     public void close() throws LeaderElectionException {
-        super.close();
-
-        String channelName = "";
-        if (channel != null && channel.getAddress() != null) {
-            channelName = "(" + channel.getAddress() + ")";
-        }
-
+        // Cancel the scheduler and drain any in-flight tick before resetting state.
+        // This prevents a concurrent tick from calling setLeader() after super.close()
+        // has already reset isLeader to null.
         if (scheduledFuture != null) {
             try {
-                scheduledFuture.cancel(true);
+                scheduledFuture.cancel(false);
             } catch (Exception e) {
                 // NOP
             }
@@ -106,11 +108,20 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
         if (scheduledExecuterService != null) {
             try {
                 scheduledExecuterService.shutdown();
+                long closeMillis = getLeaderElectionConfiguration().getCloseTimeout().toMillis();
+                scheduledExecuterService.awaitTermination(closeMillis, TimeUnit.MILLISECONDS);
             } catch (Exception e) {
                 // NOP
             }
             scheduledExecuterService = null;
         }
+
+        String channelName = "";
+        if (channel != null && channel.getAddress() != null) {
+            channelName = "(" + channel.getAddress() + ")";
+        }
+
+        super.close();
 
         if (channel != null) {
             try {

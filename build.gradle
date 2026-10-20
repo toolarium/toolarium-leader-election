@@ -10,6 +10,10 @@ apply from: "https://raw.githubusercontent.com/toolarium/common-gradle-build/mas
  * Define project dependencies
  ****************************************************************************************/
 dependencies {
+    // logging
+    implementation "org.slf4j:slf4j-api:${commonGradleSlf4jApiVersion}"
+    testRuntimeOnly "ch.qos.logback:logback-classic:${commonGradleLogbackVersion}"
+
     // optional runtime dependencies (consumers must add these if they use the respective strategy)
     compileOnly 'org.jgroups:jgroups:5.5.6.Final'
     compileOnly 'io.kubernetes:client-java:27.0.0'
@@ -20,12 +24,17 @@ dependencies {
     testImplementation 'io.kubernetes:client-java-extended:27.0.0'
     testImplementation 'com.h2database:h2:2.4.240'
 
-    // logging
-    implementation "org.slf4j:slf4j-api:${commonGradleSlf4jApiVersion}"
-    testRuntimeOnly "ch.qos.logback:logback-classic:${commonGradleLogbackVersion}"
-
-   // testRuntimeOnly "org.junit.platform:junit-platform-commons:1.7.0"
+    // testRuntimeOnly "org.junit.platform:junit-platform-commons:1.7.0"
 }
+
+
+/****************************************************************************************
+ * Suppress obsolete source/target warnings when compiling with a newer JDK
+ ****************************************************************************************/
+tasks.withType(JavaCompile) {
+    options.compilerArgs << '-Xlint:-options'
+}
+
 
 /****************************************************************************************
  * Integration test source set (only compiled and run with -Pintegration)

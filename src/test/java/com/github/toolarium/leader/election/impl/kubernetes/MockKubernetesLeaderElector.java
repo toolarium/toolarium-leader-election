@@ -5,11 +5,12 @@
  */
 package com.github.toolarium.leader.election.impl.kubernetes;
 
-import com.github.toolarium.leader.election.LeaderElector;
+import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import io.kubernetes.client.extended.leaderelection.Lock;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
@@ -54,6 +55,16 @@ public final class MockKubernetesLeaderElector {
 
 
     /**
+     * Create a fluent builder for constructing a mock Kubernetes leader elector.
+     *
+     * @return a new {@link Builder}
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
+
+    /**
      * Mock the kubernetes leader elector implementation
      *
      * @param leaderElectionInformation the leader election information
@@ -62,8 +73,160 @@ public final class MockKubernetesLeaderElector {
      * @throws IOException in case of an i/o error
      * @throws IllegalArgumentException In case of a parameter failure
      */
-    public LeaderElector getLeaderElection(LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) throws IOException {
+    public ILeaderElector getLeaderElection(LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) throws IOException {
         return new KubernetesLeaderElectorMock(leaderElectionInformation, leaderElectionConfiguration);
+    }
+
+
+    /**
+     * Fluent builder for a mock Kubernetes leader elector.
+     *
+     * @author patrick
+     */
+    public static final class Builder {
+        private String namespace = "";
+        private String name = "";
+        private String identity = "";
+        private Duration timeout;
+        private Duration renewDeadline;
+        private Duration retryPeriod;
+        private Duration closeTimeout;
+
+
+        /**
+         * Constructor (package-private — use {@link MockKubernetesLeaderElector#builder()})
+         */
+        private Builder() {
+            // NOP
+        }
+
+
+        /**
+         * Set the namespace.
+         *
+         * @param namespace the namespace
+         * @return this builder
+         */
+        public Builder namespace(String namespace) {
+            if (namespace != null) {
+                this.namespace = namespace;
+            } else {
+                this.namespace = "";
+            }
+            return this;
+        }
+
+
+        /**
+         * Set the name.
+         *
+         * @param name the name
+         * @return this builder
+         */
+        public Builder name(String name) {
+            if (name != null) {
+                this.name = name;
+            } else {
+                this.name = "";
+            }
+            return this;
+        }
+
+
+        /**
+         * Set the per-node identity.
+         *
+         * @param identity the identity
+         * @return this builder
+         */
+        public Builder identity(String identity) {
+            if (identity != null) {
+                this.identity = identity;
+            } else {
+                this.identity = "";
+            }
+            return this;
+        }
+
+
+        /**
+         * Set the leadership lease timeout.
+         *
+         * @param timeout the timeout
+         * @return this builder
+         */
+        public Builder timeout(Duration timeout) {
+            this.timeout = timeout;
+            return this;
+        }
+
+
+        /**
+         * Set the renew deadline.
+         *
+         * @param renewDeadline the renew deadline
+         * @return this builder
+         */
+        public Builder renewDeadline(Duration renewDeadline) {
+            this.renewDeadline = renewDeadline;
+            return this;
+        }
+
+
+        /**
+         * Set the retry period.
+         *
+         * @param retryPeriod the retry period
+         * @return this builder
+         */
+        public Builder retryPeriod(Duration retryPeriod) {
+            this.retryPeriod = retryPeriod;
+            return this;
+        }
+
+
+        /**
+         * Set the close timeout.
+         *
+         * @param closeTimeout the close timeout
+         * @return this builder
+         */
+        public Builder closeTimeout(Duration closeTimeout) {
+            this.closeTimeout = closeTimeout;
+            return this;
+        }
+
+
+        /**
+         * Build the mock Kubernetes leader elector.
+         *
+         * @return the leader elector
+         * @throws IOException in case of an i/o error
+         */
+        public ILeaderElector build() throws IOException {
+            LeaderElectionConfiguration config;
+            if (timeout != null && renewDeadline != null && retryPeriod != null) {
+                config = new LeaderElectionConfiguration(timeout, renewDeadline, retryPeriod);
+            } else if (timeout != null && renewDeadline == null && retryPeriod == null) {
+                config = new LeaderElectionConfiguration(timeout.toSeconds());
+            } else {
+                config = new LeaderElectionConfiguration();
+                if (timeout != null) {
+                    config.setTimeout(timeout);
+                }
+                if (renewDeadline != null) {
+                    config.setRenewDeadline(renewDeadline);
+                }
+                if (retryPeriod != null) {
+                    config.setRetryPeriod(retryPeriod);
+                }
+            }
+            if (closeTimeout != null) {
+                config.setCloseTimeout(closeTimeout);
+            }
+            return MockKubernetesLeaderElector.getInstance().getLeaderElection(
+                    new LeaderElectionInformation(namespace, name, identity), config);
+        }
     }
 
 

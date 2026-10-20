@@ -12,11 +12,12 @@ import java.util.Objects;
  * Defines the leader election information
  * @author patrick
  */
-public class LeaderElectionInformation {
+public class LeaderElectionInformation implements ILeaderElectionInformation {
     private String namespace;
     private String name;
     private String identity;
-    
+    private String username;
+
 
     /**
      * Constructor for LeaderElectionInformation
@@ -29,9 +30,10 @@ public class LeaderElectionInformation {
         this.namespace = namespace;
         this.name = name;
         this.identity = identity;
+        this.username = System.getProperty("user.name");
     }
 
-    
+
     /**
      * Constructor for LeaderElectionInformation
      *
@@ -109,6 +111,30 @@ public class LeaderElectionInformation {
 
 
     /**
+     * @see com.github.toolarium.leader.election.dto.ILeaderElectionInformation#getUsername()
+     */
+    @Override
+    public String getUsername() {
+        return username;
+    }
+
+
+    /**
+     * Set the username. Use this to override the default OS username
+     * ({@code System.getProperty("user.name")}) with an application-supplied value.
+     *
+     * @param username the username to store; must not be {@code null}
+     * @return this instance for method chaining
+     */
+    public LeaderElectionInformation setUsername(String username) {
+        if (username != null) {
+            this.username = username;
+        }
+        return this;
+    }
+
+
+    /**
      * @see java.lang.Object#hashCode()
      */
     @Override
@@ -125,15 +151,15 @@ public class LeaderElectionInformation {
         if (this == obj) {
             return true;
         }
-        
+
         if (obj == null) {
             return false;
         }
-        
+
         if (getClass() != obj.getClass()) {
             return false;
         }
-        
+
         LeaderElectionInformation other = (LeaderElectionInformation) obj;
         return Objects.equals(identity, other.identity) && Objects.equals(name, other.name) && Objects.equals(namespace, other.namespace);
     }
@@ -203,6 +229,6 @@ public class LeaderElectionInformation {
      */
     @Override
     public String toString() {
-        return "LeaderElectionInformation [namespace=" + namespace + ", name=" + name + ", identity=" + identity + "]";
+        return "LeaderElectionInformation [namespace=" + namespace + ", name=" + name + ", identity=" + identity + ", username=" + username + "]";
     }
 }

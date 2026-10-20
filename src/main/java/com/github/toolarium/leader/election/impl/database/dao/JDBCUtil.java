@@ -12,7 +12,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
-import java.io.StringReader;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -185,22 +184,11 @@ public final class JDBCUtil {
                                             
                     stmnt.setObject(i + 1, value);
                 } else if (value instanceof CharSequence) {
-                    boolean isClob = false;
-                    try {
-                        java.sql.ResultSetMetaData meta = stmnt.getMetaData();
-                        isClob = meta != null && meta.getColumnType(i + 1) == Types.CLOB;
-                    } catch (SQLException e) {
-                        // some drivers (e.g. MariaDB 3.x) throw when getMetaData() is called on non-SELECT statements
-                    }
                     if (LOG.isDebugEnabled()) {
-                        LOG.debug(SET_DATA_TO_COLUMN + i + "': [" + value + "] (" + isClob + ")");
+                        LOG.debug(SET_DATA_TO_COLUMN + i + "': [" + value + "]");
                     }
 
-                    if (isClob) {
-                        stmnt.setClob(i + 1, new StringReader(((CharSequence) value).toString()));
-                    } else {
-                        stmnt.setObject(i + 1, value);
-                    }
+                    stmnt.setString(i + 1, ((CharSequence) value).toString());
                 } else if (value instanceof Integer || value instanceof Long
                          || value instanceof Float || value instanceof Double
                          || value instanceof Boolean

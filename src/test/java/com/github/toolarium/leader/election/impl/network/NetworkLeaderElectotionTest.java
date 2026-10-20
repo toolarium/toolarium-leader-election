@@ -6,11 +6,11 @@
 package com.github.toolarium.leader.election.impl.network;
 
 import com.github.toolarium.leader.election.AbstractLeaderElectorTest;
+import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.LeaderElectionFactory;
-import com.github.toolarium.leader.election.LeaderElectionStrategy;
-import com.github.toolarium.leader.election.LeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
+import com.github.toolarium.leader.election.dto.LeaderElectionStrategy;
 
 
 /**
@@ -26,7 +26,7 @@ public class NetworkLeaderElectotionTest extends AbstractLeaderElectorTest {
      */
     @Override
     protected long getInitWaitMillis() {
-        return 4500L;
+        return 8000L;
     }
 
 
@@ -35,7 +35,7 @@ public class NetworkLeaderElectotionTest extends AbstractLeaderElectorTest {
      */
     @Override
     protected long getFailoverWaitMillis() {
-        return 6000L;
+        return 12000L;
     }
 
 
@@ -43,8 +43,8 @@ public class NetworkLeaderElectotionTest extends AbstractLeaderElectorTest {
      * @see com.github.toolarium.leader.election.AbstractLeaderElectorTest#createLeaderElector(java.lang.String)
      */
     @Override
-    protected LeaderElector createLeaderElector(String name) throws Exception {
+    protected ILeaderElector createLeaderElector(String name) throws Exception {
         return LeaderElectionFactory.getInstance().getLeaderElection(
-                LeaderElectionStrategy.NETWORK, new LeaderElectionInformation(name), new LeaderElectionConfiguration(2));
+                LeaderElectionStrategy.NETWORK, new LeaderElectionInformation(name), new LeaderElectionConfiguration(10));
     }
 }

@@ -3,7 +3,7 @@
  *
  * Copyright by toolarium, all rights reserved.
  */
-package com.github.toolarium.leader.election;
+package com.github.toolarium.leader.election.dto;
 
 /**
  * Defines the leader election strategy.
@@ -19,7 +19,7 @@ public enum LeaderElectionStrategy {
 
     /** Network-based cluster membership leader election (jgroup). */
     NETWORK,
-    
+
     /** Kubernetes lease-based leader election. */
     KUBERNETES;
 }

@@ -15,7 +15,7 @@ import java.time.Duration;
  * @author patrick
  */
 public class FileLeaderElectionConfiguration extends LeaderElectionConfiguration {
-    private String basePath = System.getProperty("java.io.tmpdir");
+    private String basePath;
 
     
     /**
@@ -25,6 +25,7 @@ public class FileLeaderElectionConfiguration extends LeaderElectionConfiguration
      */
     public FileLeaderElectionConfiguration() throws IllegalArgumentException {
         super();
+        basePath = createBasePath(null);
     }
 
 
@@ -36,9 +37,10 @@ public class FileLeaderElectionConfiguration extends LeaderElectionConfiguration
      */
     public FileLeaderElectionConfiguration(long timeoutInSeconds) throws IllegalArgumentException {
         super(timeoutInSeconds);
+        basePath = createBasePath(null);
     }
 
-    
+
     /**
      * Constructor for FileLeaderElectionConfiguration
      *
@@ -49,6 +51,7 @@ public class FileLeaderElectionConfiguration extends LeaderElectionConfiguration
      */
     public FileLeaderElectionConfiguration(Duration timeout, Duration renewDeadline, Duration retryPeriod) throws IllegalArgumentException {
         super(timeout, renewDeadline, retryPeriod);
+        basePath = createBasePath(null);
     }
 
     
@@ -83,6 +86,16 @@ public class FileLeaderElectionConfiguration extends LeaderElectionConfiguration
      */
     public String getBasePath() {
         return basePath;
+    }
+
+
+    /**
+     * Sets the base path
+     *
+     * @param basePath the base path
+     */
+    public void setBasePath(String basePath) {
+        this.basePath = createBasePath(basePath);
     }
 
 

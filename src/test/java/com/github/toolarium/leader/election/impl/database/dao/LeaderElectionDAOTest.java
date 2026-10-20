@@ -14,6 +14,7 @@ import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfigu
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.List;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -58,10 +59,10 @@ public class LeaderElectionDAOTest {
         leaderElectionDAO.insertLeader(leaderElectorRecord);
         assertEquals(1, leaderElectionDAO.deleteLeaderByName(MYTEST));
 
-        // insert new leader and delete
+        // insert new leader and delete by stable instance id
         leaderElectorRecord = new LeaderElectorRecord(MYTEST, "instance1", USER);
         assertEquals(1, leaderElectionDAO.insertLeader(leaderElectorRecord));
-        assertEquals(1, leaderElectionDAO.deleteLeaderByNameAndId(MYTEST, leaderElectorRecord.getId()));
+        assertEquals(1, leaderElectionDAO.deleteLeaderByNameAndInstance(MYTEST, leaderElectorRecord.getInstance()));
 
         // insert new leader 
         leaderElectorRecord = new LeaderElectorRecord(MYTEST, "instance1", USER);
@@ -190,6 +191,39 @@ public class LeaderElectionDAOTest {
         int noSteal = dao.stealLeadership("freshgroup", "uuid-fresh", expiryThreshold,
                 new LeaderElectorRecord("freshgroup", "instance-B", "user2"));
         assertEquals(0, noSteal, "Stealing a non-expired lease must fail");
+    }
+
+
+    /**
+     * Verify selectAll() returns an empty list for an empty table, one record after a single insert,
+     * and two records after inserts into two different election groups.
+     *
+     * @throws SQLException In case of a database error
+     */
+    @Test
+    public void testSelectAll() throws SQLException {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:selectalldao;DB_CLOSE_DELAY=-1");
+        ds.setUser(SA);
+        ds.setPassword("");
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(2);
+        config.setDataSource(ds);
+        LeaderElectionDAO dao = new LeaderElectionDAO(config);
+        dao.init();
+
+        List<LeaderElectorRecord> emptyResult = dao.selectAll();
+        assertTrue(emptyResult.isEmpty(), "selectAll() must return an empty list when no leaders are stored");
+
+        LeaderElectorRecord recA = new LeaderElectorRecord("group-a", "instance-1", USER);
+        assertEquals(1, dao.insertLeader(recA));
+        List<LeaderElectorRecord> oneResult = dao.selectAll();
+        assertEquals(1, oneResult.size(), "selectAll() must return one record after inserting one leader");
+        assertEquals("instance-1", oneResult.get(0).getInstance());
+
+        LeaderElectorRecord recB = new LeaderElectorRecord("group-b", "instance-2", USER);
+        assertEquals(1, dao.insertLeader(recB));
+        List<LeaderElectorRecord> twoResult = dao.selectAll();
+        assertEquals(2, twoResult.size(), "selectAll() must return two records after inserting a second leader");
     }
 
 

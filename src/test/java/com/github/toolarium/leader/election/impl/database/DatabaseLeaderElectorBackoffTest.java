@@ -8,10 +8,10 @@ package com.github.toolarium.leader.election.impl.database;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.LeaderElectionFactory;
-import com.github.toolarium.leader.election.LeaderElectionStrategy;
-import com.github.toolarium.leader.election.LeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
+import com.github.toolarium.leader.election.dto.LeaderElectionStrategy;
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import java.io.PrintWriter;
 import java.lang.reflect.Field;
@@ -19,7 +19,6 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.time.Duration;
-import java.util.function.BooleanSupplier;
 import javax.sql.DataSource;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -56,13 +55,11 @@ public class DatabaseLeaderElectorBackoffTest {
                 Duration.ofSeconds(2), Duration.ofSeconds(1), Duration.ofMillis(300));
         config.setDataSource(fds);
 
-        LeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
+        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
                 LeaderElectionStrategy.DATABASE,
                 new LeaderElectionInformation("backoff-test"),
                 config);
-        elector.initialize();
-        awaitCondition(() -> elector.isLeader(), 3000);
-        assertTrue(elector.isLeader(), "Elector must establish leadership before test can proceed");
+        assertTrue(elector.elect(), "Elector must establish leadership before test can proceed");
 
         // Induce failures — each scheduler tick (300 ms) will throw on getConnection()
         fds.setFailing(true);
@@ -110,13 +107,11 @@ public class DatabaseLeaderElectorBackoffTest {
                 Duration.ofSeconds(2), Duration.ofSeconds(1), Duration.ofMillis(300));
         config.setDataSource(fds);
 
-        LeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
+        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
                 LeaderElectionStrategy.DATABASE,
                 new LeaderElectionInformation("backoff-recovery"),
                 config);
-        elector.initialize();
-        awaitCondition(() -> elector.isLeader(), 3000);
-        assertTrue(elector.isLeader());
+        assertTrue(elector.elect());
 
         // Trigger at least 3 failures (3 × 300ms = 900ms + buffer)
         fds.setFailing(true);
@@ -143,21 +138,6 @@ public class DatabaseLeaderElectorBackoffTest {
         assertEquals(0L, backoffUntilAfter, "backoffUntil must reset to 0 after a successful tick");
 
         elector.close();
-    }
-
-
-    /**
-     * Poll the given condition every 50 ms until it returns {@code true} or the timeout elapses.
-     *
-     * @param condition     the condition to poll
-     * @param timeoutMillis maximum time to wait in milliseconds
-     * @throws InterruptedException if the polling sleep is interrupted
-     */
-    private static void awaitCondition(BooleanSupplier condition, long timeoutMillis) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + timeoutMillis;
-        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(50);
-        }
     }
 
 

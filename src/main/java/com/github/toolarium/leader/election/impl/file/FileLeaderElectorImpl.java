@@ -5,16 +5,17 @@
  */
 package com.github.toolarium.leader.election.impl.file;
 
-import com.github.toolarium.leader.election.LeaderElector;
+import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.dto.file.FileLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl;
+import com.github.toolarium.leader.election.impl.file.exception.FileLockException;
 import java.io.File;
 
 
 /**
- * Implements the {@link LeaderElector} based on file access.
+ * Implements the {@link ILeaderElector} based on file access.
  * 
  * @author patrick
  */
@@ -66,12 +67,34 @@ public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderE
     
     
     /**
-     * @see com.github.toolarium.leader.election.LeaderElector#close()
+     * @see com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl#extendLeaseNow()
+     */
+    @Override
+    protected boolean extendLeaseNow() throws LeaderElectionException {
+        if (!isLeader() || fileLock == null) {
+            return false;
+        }
+        try {
+            fileLock.renew();
+            return isLeader();
+        } catch (FileLockException e) {
+            setLeader(false, null);
+            return false;
+        }
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.ILeaderElector#close()
      */
     @Override
     public void close() throws LeaderElectionException {
-        super.close();
-        FileLockFactory.getInstance().release(fileLock);
+        FileLock lockToRelease = fileLock;
         fileLock = null;
+        try {
+            super.close();
+        } finally {
+            FileLockFactory.getInstance().release(lockToRelease);
+        }
     }
 }

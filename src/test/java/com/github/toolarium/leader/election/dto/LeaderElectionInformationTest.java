@@ -167,6 +167,9 @@ public class LeaderElectionInformationTest {
     @Test
     public void testToString() {
         LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
-        assertEquals("LeaderElectionInformation [namespace=ns, name=myapp, identity=node-1]", info.toString());
+        String str = info.toString();
+        // username is the OS user at test runtime — verify the fixed parts only
+        org.junit.jupiter.api.Assertions.assertTrue(str.startsWith("LeaderElectionInformation [namespace=ns, name=myapp, identity=node-1, username="));
+        org.junit.jupiter.api.Assertions.assertTrue(str.endsWith("]"));
     }
 }

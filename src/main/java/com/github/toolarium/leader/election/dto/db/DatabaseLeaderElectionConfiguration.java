@@ -114,9 +114,8 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
      */
     protected void validate() {
         super.validate();
-        if (leaderElectionDatabaseStructure == null) {
-            leaderElectionDatabaseStructure = new JDBCLeaderElectionDatabaseStructure();
-        }
+        // leaderElectionDatabaseStructure may be null here — the DAO auto-detects the
+        // correct dialect from the JDBC product name on first connection if none is set.
     }
 
 
@@ -177,12 +176,15 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
 
 
         /**
-         * Create the leader election index
+         * Create the leader election index.
+         * Returns {@code null} because the PRIMARY KEY on {@code name} already creates an index
+         * in every supported database. Subclasses may override if an explicit secondary index
+         * is needed for a non-standard dialect.
          *
-         * @return the leader election index
+         * @return {@code null} (no additional index required)
          */
         public String createSQLIndex() {
-            return "CREATE INDEX idx_" + getTableName() + " on " + getTableName() + "(name);";
+            return null;
         }
 
 
@@ -217,12 +219,36 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
 
 
         /**
-         * Create the delete-by-name-and-id statement of the leader election table
+         * Create the delete-by-name-and-instance statement of the leader election table.
+         * Uses the stable elector instance identifier so the delete succeeds even when a
+         * concurrent scheduler tick has already renewed the per-renewal {@code id} column.
          *
          * @return the delete statement
          */
-        public String createSQLDeleteLeaderByNameAndId() {
-            return "DELETE FROM " + getTableName() + " WHERE name = ? AND id = ?;";
+        public String createSQLDeleteLeaderByNameAndInstance() {
+            return "DELETE FROM " + getTableName() + " WHERE name = ? AND instance = ?;";
+        }
+
+
+        /**
+         * Create the delete-by-instance statement of the leader election table.
+         * Deletes the row for the given stable elector instance id regardless of election group name.
+         * Used by the administration API to force-release a remote leader in a single round-trip.
+         *
+         * @return the delete statement
+         */
+        public String createSQLDeleteLeaderByInstance() {
+            return "DELETE FROM " + getTableName() + " WHERE instance = ?;";
+        }
+
+
+        /**
+         * Create the select statement to return all stored leader election records.
+         *
+         * @return the select-all statement
+         */
+        public String createSQLSelectAll() {
+            return "SELECT id, name, instance, username, lease_ts FROM " + getTableName() + ";";
         }
 
 

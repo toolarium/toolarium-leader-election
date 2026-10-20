@@ -32,10 +32,12 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
 
     /**
      * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLIndex()
+     *     The PRIMARY KEY on the {@code name} column already creates a B-tree index in all JDBC-compatible
+     *     databases (PostgreSQL, H2, etc.), so no additional index is needed.
      */
     @Override
     public String createSQLIndex() {
-        return "CREATE INDEX idx_" + getTableName() + " on " + getTableName() + "(name)";
+        return null;
     }
 
 
@@ -67,11 +69,29 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
 
 
     /**
-     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLDeleteLeaderByNameAndId()
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLDeleteLeaderByNameAndInstance()
      */
     @Override
-    public String createSQLDeleteLeaderByNameAndId() {
-        return "DELETE FROM " + getTableName() + " WHERE name = ? AND id = ?";
+    public String createSQLDeleteLeaderByNameAndInstance() {
+        return "DELETE FROM " + getTableName() + " WHERE name = ? AND instance = ?";
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLDeleteLeaderByInstance()
+     */
+    @Override
+    public String createSQLDeleteLeaderByInstance() {
+        return "DELETE FROM " + getTableName() + " WHERE instance = ?";
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLSelectAll()
+     */
+    @Override
+    public String createSQLSelectAll() {
+        return "SELECT id, name, instance, username, lease_ts FROM " + getTableName();
     }
 
 

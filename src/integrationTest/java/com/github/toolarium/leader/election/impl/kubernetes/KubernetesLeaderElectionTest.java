@@ -6,7 +6,7 @@
 package com.github.toolarium.leader.election.impl.kubernetes;
 
 import com.github.toolarium.leader.election.AbstractLeaderElectorTest;
-import com.github.toolarium.leader.election.LeaderElector;
+import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import io.kubernetes.client.openapi.ApiClient;
@@ -55,7 +55,7 @@ public class KubernetesLeaderElectionTest extends AbstractLeaderElectorTest {
      * @see com.github.toolarium.leader.election.AbstractLeaderElectorTest#createLeaderElector(java.lang.String)
      */
     @Override
-    protected LeaderElector createLeaderElector(String name) throws Exception {
+    protected ILeaderElector createLeaderElector(String name) throws Exception {
         // Kubernetes resource names must be lowercase RFC 1123: convert camelCase to kebab-case
         String lockName = name.replaceAll("([A-Z])", "-$1").toLowerCase().replaceAll("^-", "");
         String identity = lockName + "-" + counter.incrementAndGet();
