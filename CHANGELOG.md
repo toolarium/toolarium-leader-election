@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [ 1.2.2 ] - 2026-10-22
+
 ## [ 1.2.1 ] - 2026-10-22
 ### Added
 - **DATABASE**: a secondary index on the `instance` column is now created automatically alongside the table. This makes the administration API `forceRelease()` path (`deleteLeaderByInstance`) O(1) instead of a full table scan. Existing installations are not affected (the index is created only when the table is first created); it can be added manually with `CREATE INDEX idx_leaderelection_instance ON LeaderElection(instance)`.
