@@ -35,16 +35,6 @@ public class MySQLLeaderElectionDatabaseStructure extends JDBCLeaderElectionData
 
 
     /**
-     * @see com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure#createSQLIndex()
-     *     MySQL PRIMARY KEY already creates a clustered index on the key column; no additional index is needed.
-     */
-    @Override
-    public String createSQLIndex() {
-        return null;
-    }
-
-
-    /**
      * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLRenameTimestampColumn()
      *     MySQL and MariaDB treat {@code timestamp} as a reserved word and require backtick quoting.
      *     {@code RENAME COLUMN} is supported since MySQL 8.0.4 and MariaDB 10.5.2.

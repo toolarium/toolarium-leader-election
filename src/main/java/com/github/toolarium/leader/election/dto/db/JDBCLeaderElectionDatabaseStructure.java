@@ -32,12 +32,14 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
 
     /**
      * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLIndex()
-     *     The PRIMARY KEY on the {@code name} column already creates a B-tree index in all JDBC-compatible
-     *     databases (PostgreSQL, H2, etc.), so no additional index is needed.
+     *     Returns a secondary index on the {@code instance} column to support the admin force-release
+     *     path ({@code deleteLeaderByInstance()}) without a full table scan.
+     *     The PRIMARY KEY on {@code name} already covers all hot-path per-tick queries.
      */
     @Override
     public String createSQLIndex() {
-        return null;
+        String safeName = getTableName().toLowerCase().replaceAll("[^a-z0-9_]", "_");
+        return "CREATE INDEX idx_" + safeName + "_instance ON " + getTableName() + "(instance)";
     }
 
 

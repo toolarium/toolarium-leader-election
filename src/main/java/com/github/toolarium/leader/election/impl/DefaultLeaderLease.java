@@ -10,10 +10,11 @@ import com.github.toolarium.leader.election.dto.ILeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.ILeaderElectionInformation;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 /**
- * Default {@link LeaderLease} implementation held by a running {@link com.github.toolarium.leader.election.LeaderTask}.
+ * Default {@link LeaderLease} implementation held by a running {@link com.github.toolarium.leader.election.ILeaderTask}.
  * The {@link LeaderLeaseMonitor} calls {@link #interruptIfRunning()} when {@link #isValid()} returns {@code false}.
  *
  * @author patrick
@@ -23,6 +24,8 @@ final class DefaultLeaderLease implements ILeaderLease {
     private final ILeaderElectionInformation leaderElectionInformation;
     private final ILeaderElectionConfiguration leaderElectionConfiguration;
     private final Thread taskThread;
+    private final long capturedTerm;
+    private final AtomicBoolean interruptedByMonitor;
 
 
     /**
@@ -32,20 +35,24 @@ final class DefaultLeaderLease implements ILeaderLease {
      * @param leaderElectionInformation the leader election information
      * @param leaderElectionConfiguration the leader election configuration
      * @param taskThread the thread executing the task
+     * @param capturedTerm the leadership term at the moment the task started
      */
     DefaultLeaderLease(AbstractLeaderElectorImpl<?> elector,
                        ILeaderElectionInformation leaderElectionInformation,
                        ILeaderElectionConfiguration leaderElectionConfiguration,
-                       Thread taskThread) {
+                       Thread taskThread,
+                       long capturedTerm) {
         this.elector = elector;
         this.leaderElectionInformation = leaderElectionInformation;
         this.leaderElectionConfiguration = leaderElectionConfiguration;
         this.taskThread = taskThread;
+        this.capturedTerm = capturedTerm;
+        this.interruptedByMonitor = new AtomicBoolean(false);
     }
 
 
     /**
-     * @see com.github.toolarium.leader.election.LeaderLease#getId()
+     * @see com.github.toolarium.leader.election.ILeaderLease#getId()
      */
     @Override
     public String getId() {
@@ -54,7 +61,7 @@ final class DefaultLeaderLease implements ILeaderLease {
 
 
     /**
-     * @see com.github.toolarium.leader.election.LeaderLease#getLeaderElectionInformation()
+     * @see com.github.toolarium.leader.election.ILeaderLease#getLeaderElectionInformation()
      */
     @Override
     public ILeaderElectionInformation getLeaderElectionInformation() {
@@ -63,7 +70,7 @@ final class DefaultLeaderLease implements ILeaderLease {
 
 
     /**
-     * @see com.github.toolarium.leader.election.LeaderLease#getLeaderElectionConfiguration()
+     * @see com.github.toolarium.leader.election.ILeaderLease#getLeaderElectionConfiguration()
      */
     @Override
     public ILeaderElectionConfiguration getLeaderElectionConfiguration() {
@@ -72,7 +79,7 @@ final class DefaultLeaderLease implements ILeaderLease {
 
 
     /**
-     * @see com.github.toolarium.leader.election.LeaderLease#getLeaderSince()
+     * @see com.github.toolarium.leader.election.ILeaderLease#getLeaderSince()
      */
     @Override
     public Instant getLeaderSince() {
@@ -81,30 +88,45 @@ final class DefaultLeaderLease implements ILeaderLease {
 
 
     /**
-     * @see com.github.toolarium.leader.election.LeaderLease#tryExtend()
+     * @see com.github.toolarium.leader.election.ILeaderLease#tryExtend()
      */
     @Override
     public boolean tryExtend() throws LeaderElectionException {
-        return elector.extendLeaseNow();
+        return elector.extendLease();
     }
 
 
     /**
-     * @see com.github.toolarium.leader.election.LeaderLease#isValid()
+     * Returns {@code true} only when this node is still the leader AND it is still the same
+     * leadership term in which the lease was created. Once invalid the lease will never become
+     * valid again, even if the elector re-acquires leadership in a later term.
+     *
+     * @see com.github.toolarium.leader.election.ILeaderLease#isValid()
      */
     @Override
     public boolean isValid() {
-        return elector.isLeader();
+        return elector.isLeader() && elector.getLeadershipTerm() == capturedTerm;
     }
 
 
     /**
-     * Interrupt the task thread if it is still alive.
-     * Called by the {@link LeaderLeaseMonitor} when the lease is no longer valid.
+     * Interrupt the task thread at most once.
+     * Subsequent calls from the {@link LeaderLeaseMonitor} (every 100 ms) are ignored
+     * after the first interrupt has been sent, preventing repeated interrupts during cleanup.
      */
     void interruptIfRunning() {
-        if (taskThread.isAlive()) {
+        if (interruptedByMonitor.compareAndSet(false, true) && taskThread.isAlive()) {
             taskThread.interrupt();
         }
+    }
+
+
+    /**
+     * Returns {@code true} if the lease monitor has already sent an interrupt to the task thread.
+     *
+     * @return true if the monitor has already interrupted the task thread
+     */
+    boolean wasInterruptedByMonitor() {
+        return interruptedByMonitor.get();
     }
 }

@@ -238,7 +238,7 @@ elector.runIfLeader("do-work", lease -> {
 |---|---|
 | `DATABASE` | First election round runs synchronously inside `elect()` — returns immediately. |
 | `FILE` | Blocks until the file lock is acquired or confirmed unavailable (~200 ms). |
-| `NETWORK` | Initial JGroups membership view applied synchronously — returns immediately. |
+| `NETWORK` | Leadership determined from the initial JGroups membership view. Returns immediately when elected; otherwise blocks until the result is confirmed (up to `timeout`). |
 | `KUBERNETES` | Blocks until the background update thread delivers the first leadership callback. |
 
 ```java
@@ -325,7 +325,7 @@ ILeaderElector leaderElector = LeaderElectionFactory.getInstance().getLeaderElec
 leaderElector.elect();
 ```
 
-The library creates and manages the required `LeaderElection` table automatically. On startup it inspects the table schema and, if a v1.0.0 installation is detected (column named `timestamp`), renames it to `lease_ts` automatically.
+The library creates and manages the required `LeaderElection` table automatically. On startup it inspects the table schema and, if a v1.0.0 installation is detected (column named `timestamp`), renames it to `lease_ts` automatically. On new installations a secondary index on the `instance` column is also created; existing installations can add it manually with `CREATE INDEX idx_leaderelection_instance ON LeaderElection(instance)`.
 
 For databases with higher latency (e.g., Oracle), use the explicit `Duration` constructor to control `timeout`, `renewDeadline`, and `retryPeriod` independently:
 

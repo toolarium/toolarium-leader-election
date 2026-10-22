@@ -33,6 +33,7 @@ public class DatabaseStructureTest {
     private static final String SEMICOLON = ";";
     private static final String CUSTOM_TABLE = "MyCustomTable";
     private static final String LEASE_TS_COL = "lease_ts";
+    private static final String INSTANCE_COL = "instance";
 
 
     /**
@@ -87,7 +88,10 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLTable().contains("varchar(36)"));
         assertTrue(s.createSQLTable().contains("bigint"));
         assertTrue(!s.createSQLTable().endsWith(SEMICOLON));
-        assertNull(s.createSQLIndex());
+        assertNotNull(s.createSQLIndex());
+        assertTrue(s.createSQLIndex().contains(INSTANCE_COL));
+        assertTrue(s.createSQLIndex().contains(DEFAULT_TABLE));
+        assertTrue(!s.createSQLIndex().endsWith(SEMICOLON));
         assertTrue(s.createSQLDropTable().contains(DEFAULT_TABLE));
         assertTrue(!s.createSQLDropTable().endsWith(SEMICOLON));
         assertTrue(s.createSQLInsertLeader().contains(DEFAULT_TABLE));
@@ -129,7 +133,8 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLTable().contains("CONSTRAINT pk_"));
         assertTrue(s.createSQLTable().contains("NOT NULL"));
         assertTrue(s.createSQLTable().contains("ROW_FORMAT=DYNAMIC"));
-        assertNull(s.createSQLIndex());
+        assertNotNull(s.createSQLIndex());
+        assertTrue(s.createSQLIndex().contains(INSTANCE_COL));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
         assertTrue(!s.createSQLUpdateLeaderTimestamp().endsWith(SEMICOLON));
         // MySQL uses backtick-quoting for the reserved word 'timestamp'
@@ -147,7 +152,8 @@ public class DatabaseStructureTest {
 
         assertTrue(s.createSQLTable().contains("CONSTRAINT pk_"));
         assertTrue(s.createSQLTable().contains("ROW_FORMAT=DYNAMIC"));
-        assertNull(s.createSQLIndex());
+        assertNotNull(s.createSQLIndex());
+        assertTrue(s.createSQLIndex().contains(INSTANCE_COL));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
         assertTrue(!s.createSQLUpdateLeaderTimestamp().endsWith(SEMICOLON));
         // MariaDB inherits MySQL backtick quoting
@@ -167,7 +173,8 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLTable().contains("VARCHAR2(36)"));
         assertTrue(s.createSQLTable().contains("NUMBER(19)"));
         assertTrue(s.createSQLTable().contains("CONSTRAINT pk_"));
-        assertNull(s.createSQLIndex());
+        assertNotNull(s.createSQLIndex());
+        assertTrue(s.createSQLIndex().contains(INSTANCE_COL));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
         assertTrue(!s.createSQLUpdateLeaderTimestamp().endsWith(SEMICOLON));
         assertTrue(s.createSQLSelectCurrentTimestampMillis().contains("FROM DUAL"));
@@ -195,6 +202,24 @@ public class DatabaseStructureTest {
 
 
     /**
+     * Test that the Oracle instance index name never exceeds 30 characters even for a long table name.
+     */
+    @Test
+    public void testOracleIndexNameTruncation() {
+        OracleLeaderElectionDatabaseStructure s = new OracleLeaderElectionDatabaseStructure();
+        s.setTableName("AVeryLongTableNameThatExceedsThirtyCharactersLimit");
+        String sql = s.createSQLIndex();
+        assertNotNull(sql);
+        int idxIdx = sql.indexOf("idx_");
+        int endIdx = sql.indexOf(" ", idxIdx);
+        String indexName = sql.substring(idxIdx, endIdx);
+        assertTrue(indexName.length() <= 30,
+                "Oracle index name must not exceed 30 characters, but was: " + indexName);
+        assertTrue(sql.contains(INSTANCE_COL), "Index must be on the instance column");
+    }
+
+
+    /**
      * Test SQLServerLeaderElectionDatabaseStructure — nvarchar type.
      */
     @Test
@@ -202,7 +227,8 @@ public class DatabaseStructureTest {
         SQLServerLeaderElectionDatabaseStructure s = new SQLServerLeaderElectionDatabaseStructure();
 
         assertTrue(s.createSQLTable().contains(DEFAULT_TABLE));
-        assertNull(s.createSQLIndex());
+        assertNotNull(s.createSQLIndex());
+        assertTrue(s.createSQLIndex().contains(INSTANCE_COL));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
         assertTrue(!s.createSQLUpdateLeaderTimestamp().endsWith(SEMICOLON));
         // SQL Server uses sp_rename instead of RENAME COLUMN
@@ -255,7 +281,9 @@ public class DatabaseStructureTest {
         s.setTableName(CUSTOM_TABLE);
 
         assertTrue(s.createSQLTable().contains(CUSTOM_TABLE));
-        assertNull(s.createSQLIndex());
+        assertNotNull(s.createSQLIndex());
+        assertTrue(s.createSQLIndex().contains(CUSTOM_TABLE));
+        assertTrue(s.createSQLIndex().contains(INSTANCE_COL));
         assertTrue(s.createSQLDropTable().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLInsertLeader().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLDeleteLeaderByName().contains(CUSTOM_TABLE));
@@ -311,7 +339,7 @@ public class DatabaseStructureTest {
         assertNotNull(cols);
         assertTrue(cols.contains("id"));
         assertTrue(cols.contains("name"));
-        assertTrue(cols.contains("instance"));
+        assertTrue(cols.contains(INSTANCE_COL));
         assertTrue(cols.contains("username"));
         assertTrue(cols.contains(LEASE_TS_COL));
         assertFalse(cols.contains("timestamp"), "Legacy column name must not appear in expected set");

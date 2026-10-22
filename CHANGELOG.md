@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [ 1.2.1 ] - 2026-10-20
+## [ 1.2.1 ] - 2026-10-22
+### Added
+- **DATABASE**: a secondary index on the `instance` column is now created automatically alongside the table. This makes the administration API `forceRelease()` path (`deleteLeaderByInstance`) O(1) instead of a full table scan. Existing installations are not affected (the index is created only when the table is first created); it can be added manually with `CREATE INDEX idx_leaderelection_instance ON LeaderElection(instance)`.
+
+### Fixed
+- **DATABASE**: node now correctly steps down when the renew deadline passes before a renewal completes, preventing expired leadership from being held beyond the configured timeout.
+- **DATABASE**: `ILeaderLease.isValid()` correctly returns `false` for a lease obtained in a prior leadership term after the node loses and then regains leadership.
+- **DATABASE**: `close()` now stops any running `runIfLeader` task before releasing the database row, ensuring tasks cannot continue executing after the lease has been surrendered.
+- **DATABASE**: non-auto-commit data sources are now supported; transactions are committed explicitly after each insert, update, or delete operation.
+- **DATABASE**: `close()` is idempotent; calling it more than once no longer causes errors or unexpected state changes.
+- **DATABASE**: scheduler threads are now daemon threads, preventing the JVM from hanging on shutdown if `close()` is not called.
+- **DATABASE**: elector can be reused after a `close()` + `elect()` cycle without restarting the application.
+- **NETWORK**: `elect()` and `elect(Duration timeout)` now reliably return the correct result when stale cluster members from a prior JVM run appear in the initial JGroups membership view. The stabilisation window is now `retryPeriod + 2 s`, guaranteeing the scheduler's first tick is never treated as the definitive result.
+- **ALL**: `elect(null)` now correctly delegates to `elect()` instead of throwing `NullPointerException`.
 
 ## [ 1.2.0 ] - 2026-10-20
 ### Added

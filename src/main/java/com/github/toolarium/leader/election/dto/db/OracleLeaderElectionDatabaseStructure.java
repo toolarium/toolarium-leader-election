@@ -44,11 +44,20 @@ public class OracleLeaderElectionDatabaseStructure extends JDBCLeaderElectionDat
 
     /**
      * @see com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure#createSQLIndex()
-     *     Oracle PRIMARY KEY already creates an index on the key column; no additional index is needed.
+     *     Returns a secondary index on the {@code instance} column.
+     *     The index name is truncated so that {@code idx_} (4) + tableName + {@code _instance} (9)
+     *     stays within Oracle's 30-character identifier limit (Oracle 12.1 and earlier).
      */
     @Override
     public String createSQLIndex() {
-        return null;
+        String base = getTableName().toLowerCase().replaceAll("[^a-z0-9_]", "_");
+        String suffix;
+        if (base.length() > 17) {
+            suffix = base.substring(0, 17);
+        } else {
+            suffix = base;
+        }
+        return "CREATE INDEX idx_" + suffix + "_instance ON " + getTableName() + "(instance)";
     }
 
 

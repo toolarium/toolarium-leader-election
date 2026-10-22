@@ -18,6 +18,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -42,6 +43,8 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
     private volatile boolean isInitialized;
     private volatile CountDownLatch electionLatch;
     private volatile boolean electionClosed;
+    private final AtomicLong leadershipTerm;
+    private volatile boolean extendingInProgress;
     private final Map<String, ReentrantLock> taskLocks;
     private final LeaderLeaseMonitor leaseMonitor;
     private final ReadWriteLock lifecycleLock;
@@ -62,6 +65,8 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         isInitialized = false;
         electionLatch = new CountDownLatch(1);
         electionClosed = false;
+        leadershipTerm = new AtomicLong(0);
+        extendingInProgress = false;
         taskLocks = new ConcurrentHashMap<>();
         leaseMonitor = new LeaderLeaseMonitor();
         lifecycleLock = new ReentrantReadWriteLock();
@@ -93,6 +98,9 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      */
     @Override
     public boolean elect(Duration timeout) throws LeaderElectionException, InterruptedException {
+        if (timeout == null) {
+            return elect();
+        }
         startElectionIfNeeded();
         electionLatch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
         return isLeader();
@@ -110,19 +118,38 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
 
 
     /**
+     * Return the current leadership term counter. The counter is incremented each time this
+     * node transitions from non-leader to leader. A {@link DefaultLeaderLease} captures the
+     * term at creation; {@link DefaultLeaderLease#isValid()} returns {@code false} once the
+     * term no longer matches, preventing a lease from a previous term from becoming valid again
+     * after the elector re-acquires leadership.
+     *
+     * @return the current leadership term
+     */
+    long getLeadershipTerm() {
+        return leadershipTerm.get();
+    }
+
+
+    /**
+     * Returns {@code true} once at least one call to {@link #setLeader} has been made
+     * (isLeader is not null). Used by subclasses to decide whether {@link #elect()} needs
+     * to be unblocked with a "not leader" result on the first election round failure.
+     *
+     * @return true if a leader election result has been established
+     */
+    protected boolean hasElectionResult() {
+        return isLeader != null;
+    }
+
+
+    /**
      * @see com.github.toolarium.leader.election.ILeaderElector#isLeader()
      */
     @Override
     public boolean isLeader() {
-        if (isLeader != null) {
-            if (isLeader.booleanValue()) {
-                return true;
-            }
-
-            return false;
-        }
-
-        return false;
+        Boolean current = isLeader;
+        return current != null && current.booleanValue();
     }
 
 
@@ -155,26 +182,20 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         // elapses (tasks will still be interrupted by the monitor).
         Lock writeLock = lifecycleLock.writeLock();
         boolean locked = false;
-        long deadline = System.currentTimeMillis() + leaderElectionConfiguration.getCloseTimeout().toMillis();
-        while (!locked && System.currentTimeMillis() < deadline) {
-            locked = writeLock.tryLock();
-            if (!locked) {
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
+        try {
+            locked = writeLock.tryLock(leaderElectionConfiguration.getCloseTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
 
         try {
-            if (wasLeader && LOG.isDebugEnabled()) {
-                LOG.debug("Release lead of [{}]{}", leaderElectionInformation.getUniqueName(), description);
+            if (wasLeader) {
+                LOG.info("Released lead of [{}].", leaderElectionInformation.getUniqueName());
             }
             LeaderElectionScheduler.getInstance().unregister(this);
             description = null;
             isInitialized = false;
+            electionLatch.countDown();           // unblock any elect() waiting on the old latch
             electionLatch = new CountDownLatch(1);
         } finally {
             if (locked) {
@@ -208,11 +229,13 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
 
             ReentrantLock taskLock = taskLocks.computeIfAbsent(name, k -> new ReentrantLock());
             if (!taskLock.tryLock()) {
-                LOG.warn("runIfLeader [{}]: task already running, skipping.", name);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("runIfLeader [{}]: task already running, skipping.", name);
+                }
                 return false;
             }
 
-            DefaultLeaderLease lease = new DefaultLeaderLease(this, leaderElectionInformation, leaderElectionConfiguration, Thread.currentThread());
+            DefaultLeaderLease lease = new DefaultLeaderLease(this, leaderElectionInformation, leaderElectionConfiguration, Thread.currentThread(), getLeadershipTerm());
             leaseMonitor.register(lease);
 
             try {
@@ -222,12 +245,25 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                 task.run(lease);
                 return true;
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                LOG.debug("runIfLeader [{}]: interrupted (leadership lost or elector closed).", name);
+                // If the interrupt came from the lease monitor (leadership lost), do NOT restore
+                // the interrupt flag — it would leak to the caller after runIfLeader() returns.
+                if (!lease.wasInterruptedByMonitor()) {
+                    Thread.currentThread().interrupt();
+                }
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("runIfLeader [{}]: interrupted (leadership lost or elector closed).", name);
+                }
                 return true;
+            } catch (RuntimeException e) {
+                throw e;
             } catch (Exception e) {
                 throw new LeaderElectionException("Task '" + name + "' failed: " + e.getMessage(), e);
             } finally {
+                // If the monitor set the interrupt flag (e.g. the task never hit a blocking op),
+                // clear it here so it does not leak to the caller thread.
+                if (lease.wasInterruptedByMonitor()) {
+                    Thread.interrupted();
+                }
                 leaseMonitor.unregister(lease);
                 taskLock.unlock();
                 // Remove the entry when no thread is holding the lock to prevent
@@ -271,12 +307,33 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
 
 
     /**
+     * Wrapper called by {@link DefaultLeaderLease#tryExtend()} that sets the
+     * {@code extendingInProgress} flag for the duration of the extension. This prevents
+     * the leadership-term counter from being incremented by any {@code setLeader(true)}
+     * calls that happen as a side-effect of the extension (e.g. the FILE strategy's
+     * {@code FileLock.renew()} fires {@code releaseLock()} + {@code hasLock()} callbacks
+     * internally — those must not count as a real leader-lost / leader-gained transition).
+     *
+     * @return {@code true} if this node is still the leader after the extension attempt
+     * @throws LeaderElectionException if the extension attempt fails with an unrecoverable error
+     */
+    boolean extendLease() throws LeaderElectionException {
+        extendingInProgress = true;
+        try {
+            return extendLeaseNow();
+        } finally {
+            extendingInProgress = false;
+        }
+    }
+
+
+    /**
      * Set the leader
      *
      * @param isLeader the leader
      * @param inputDescription the description
      */
-    protected void setLeader(final Boolean isLeader, final String inputDescription) {
+    protected synchronized void setLeader(final Boolean isLeader, final String inputDescription) {
         String newDescription;
         if (inputDescription != null) {
             newDescription = " (" + inputDescription + ").";
@@ -287,9 +344,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         if (isLeader == null) {
             // unset leader
             if (this.isLeader != null && this.isLeader) {
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug("Losed lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
-                }
+                LOG.info("Lost lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
             }
 
             this.timestamp = null;
@@ -297,22 +352,46 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
             // I'm the leader — update timestamp on every confirmation so getRemainingLeadTime()
             // reflects the last renewal/extension rather than only the initial acquisition.
             if (this.isLeader == null || !this.isLeader) {
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug("Get in lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
+                if (!extendingInProgress) {
+                    // Real acquisition: increment the term so leases from previous terms
+                    // cannot become valid again after a lead loss + re-gain.
+                    leadershipTerm.incrementAndGet();
+                    LOG.info("Gained lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
                 }
+                // If extendingInProgress, we're inside tryExtend() — the unlock+lock cycle of
+                // e.g. FileLock.renew() fires releaseLock+hasLock callbacks but the node never
+                // truly lost leadership, so the term must not increment.
             }
             this.timestamp = Instant.now();
         } else {
             // No longer leader — the LeaderLeaseMonitor will detect isValid()==false on its
             // next 100 ms tick and interrupt any running tasks; no direct interrupt here.
+            if (this.isLeader != null && this.isLeader) {
+                LOG.info("Lost lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
+            }
             this.timestamp = null;
         }
 
         this.isLeader = isLeader;
         this.description = newDescription;
-        if (!electionClosed) {
+        if (!electionClosed && isElectionResultDefinitive(Boolean.TRUE.equals(isLeader))) {
             electionLatch.countDown();
         }
+    }
+
+
+    /**
+     * Returns {@code true} if the given leader-election result should unblock callers waiting
+     * on {@link #elect()} / {@link #elect(java.time.Duration)}. The default implementation
+     * always returns {@code true}; subclasses may override this to suppress premature latch
+     * release when an early result is not yet reliable (e.g. the NETWORK strategy suppresses
+     * "not leader" results during the JGroups phantom-member stabilisation window).
+     *
+     * @param isLeaderResult {@code true} if the current result is "this node is leader"
+     * @return {@code true} to count down the election latch, {@code false} to skip
+     */
+    protected boolean isElectionResultDefinitive(boolean isLeaderResult) {
+        return true;
     }
 
 

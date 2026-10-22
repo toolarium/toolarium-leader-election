@@ -45,13 +45,26 @@ public class LeaderElectorRecord {
      * @param name the name
      * @param instance the instance
      * @param user the user
+     * @param timestamp the timestamp as epoch milliseconds
      */
-    public LeaderElectorRecord(String name, String instance, String user) {
+    public LeaderElectorRecord(String name, String instance, String user, long timestamp) {
         this.id = UUID.randomUUID().toString();
         this.name = name;
         this.instance = instance;
         this.user = user;
-        this.timestamp = System.currentTimeMillis();
+        this.timestamp = timestamp;
+    }
+
+
+    /**
+     * Constructor for LeaderElectorRecord
+     *
+     * @param name the name
+     * @param instance the instance
+     * @param user the user
+     */
+    public LeaderElectorRecord(String name, String instance, String user) {
+        this(name, instance, user, System.currentTimeMillis());
     }
 
     

@@ -39,7 +39,8 @@ import org.slf4j.LoggerFactory;
 public class LeaderElectionDAO {
     private static final Logger LOG = LoggerFactory.getLogger(LeaderElectionDAO.class);
     private final DatabaseLeaderElectionConfiguration leaderElectionConfiguration;
-    private LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
+    private volatile LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
+    private final int queryTimeoutSeconds;
 
 
     /**
@@ -50,6 +51,10 @@ public class LeaderElectionDAO {
     public LeaderElectionDAO(DatabaseLeaderElectionConfiguration leaderElectionConfiguration) {
         this.leaderElectionConfiguration = leaderElectionConfiguration;
         this.leaderElectionDatabaseStructure = leaderElectionConfiguration.getLeaderElectionDatabaseStructure();
+        // Bound each statement to the retry period so a hanging DB call cannot block
+        // the election thread indefinitely (Issue #1: leader never steps down on DB hang).
+        long retryMillis = leaderElectionConfiguration.getRetryPeriod().toMillis();
+        this.queryTimeoutSeconds = Math.max(1, (int) ((retryMillis + 999) / 1000));
     }
 
 
@@ -156,12 +161,15 @@ public class LeaderElectionDAO {
     public int insertLeader(LeaderElectorRecord leaderElectorRecord) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
              PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLInsertLeader())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {
                 leaderElectorRecord.getId(), leaderElectorRecord.getName(),
                 leaderElectorRecord.getInstance(), leaderElectorRecord.getUser(),
                 leaderElectorRecord.getTimestamp()
             });
-            return stmt.executeUpdate();
+            int rows = stmt.executeUpdate();
+            commitIfNeeded(conn);
+            return rows;
         } catch (SQLIntegrityConstraintViolationException uc) {
             return -1;
         } catch (SQLException e) {
@@ -184,8 +192,11 @@ public class LeaderElectionDAO {
     public int deleteLeaderByName(String name) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
              PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByName())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {name});
-            return stmt.executeUpdate();
+            int rows = stmt.executeUpdate();
+            commitIfNeeded(conn);
+            return rows;
         }
     }
 
@@ -201,8 +212,11 @@ public class LeaderElectionDAO {
     public int deleteLeaderByInstance(String instanceId) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
              PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByInstance())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {instanceId});
-            return stmt.executeUpdate();
+            int rows = stmt.executeUpdate();
+            commitIfNeeded(conn);
+            return rows;
         }
     }
 
@@ -220,8 +234,11 @@ public class LeaderElectionDAO {
     public int deleteLeaderByNameAndInstance(String name, String instanceId) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByNameAndInstance())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {name, instanceId});
-            return stmt.executeUpdate();
+            int rows = stmt.executeUpdate();
+            commitIfNeeded(conn);
+            return rows;
         }
     }
 
@@ -236,6 +253,7 @@ public class LeaderElectionDAO {
     public LeaderElectorRecord selectLeaderByName(String name) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
              PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLSelectLeaderByName())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {name});
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
@@ -271,19 +289,21 @@ public class LeaderElectionDAO {
         List<LeaderElectorRecord> result = new ArrayList<>();
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection()) {
             ensureStructure(conn);
-            try (Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectAll())) {
-                while (rs.next()) {
-                    Object[] columns = JDBCUtil.getInstance().getValues(rs);
-                    long leaseTs;
-                    if (columns[4] instanceof Number) {
-                        leaseTs = ((Number) columns[4]).longValue();
-                    } else {
-                        leaseTs = Long.parseLong(columns[4].toString());
+            try (Statement stmt = conn.createStatement()) {
+                stmt.setQueryTimeout(queryTimeoutSeconds);
+                try (ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectAll())) {
+                    while (rs.next()) {
+                        Object[] columns = JDBCUtil.getInstance().getValues(rs);
+                        long leaseTs;
+                        if (columns[4] instanceof Number) {
+                            leaseTs = ((Number) columns[4]).longValue();
+                        } else {
+                            leaseTs = Long.parseLong(columns[4].toString());
+                        }
+                        result.add(new LeaderElectorRecord(
+                            (String) columns[0], (String) columns[1],
+                            (String) columns[2], (String) columns[3], leaseTs));
                     }
-                    result.add(new LeaderElectorRecord(
-                        (String) columns[0], (String) columns[1],
-                        (String) columns[2], (String) columns[3], leaseTs));
                 }
             }
         }
@@ -304,8 +324,11 @@ public class LeaderElectionDAO {
     public int updateLeaderTimestamp(String name, String instanceId, String newId, long timestamp) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
              PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLUpdateLeaderTimestamp())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {newId, timestamp, name, instanceId});
-            return stmt.executeUpdate();
+            int rows = stmt.executeUpdate();
+            commitIfNeeded(conn);
+            return rows;
         }
     }
 
@@ -326,31 +349,38 @@ public class LeaderElectionDAO {
     public int stealLeadership(String name, String currentLeaderId, long expiryThreshold, LeaderElectorRecord newRecord) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
              PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLStealLeadership())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {
                 newRecord.getId(), newRecord.getInstance(), newRecord.getUser(),
                 newRecord.getTimestamp(), name, currentLeaderId, expiryThreshold
             });
-            return stmt.executeUpdate();
+            int rows = stmt.executeUpdate();
+            commitIfNeeded(conn);
+            return rows;
         }
     }
 
 
     /**
      * Query the database server's current time and return it as epoch milliseconds.
-     * Falls back to {@code System.currentTimeMillis()} if the query fails.
+     * Throws {@link SQLException} if the connection or query fails — callers must handle
+     * this as a tick failure rather than falling back to the local clock, which would
+     * reintroduce the node-clock-skew problem this method is designed to eliminate.
      *
      * @return the database server's current time as epoch milliseconds
-     * @throws SQLException In case of a database error
+     * @throws SQLException if the connection or query fails
      */
     public long getDatabaseCurrentTimeMillis() throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection()) {
             ensureStructure(conn);
-            try (Statement stmt = conn.createStatement();
-                 ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectCurrentTimestampMillis())) {
-                if (rs.next()) {
-                    Timestamp ts = rs.getTimestamp(1);
-                    if (ts != null) {
-                        return ts.getTime();
+            try (Statement stmt = conn.createStatement()) {
+                stmt.setQueryTimeout(queryTimeoutSeconds);
+                try (ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectCurrentTimestampMillis())) {
+                    if (rs.next()) {
+                        Timestamp ts = rs.getTimestamp(1);
+                        if (ts != null) {
+                            return ts.getTime();
+                        }
                     }
                 }
             }
@@ -443,6 +473,22 @@ public class LeaderElectionDAO {
             }
         }
         return new LinkedHashSet<>();
+    }
+
+
+    /**
+     * Commit the current connection's transaction if auto-commit is disabled.
+     * Connection pools configured without auto-commit (or connections used inside a non-managed
+     * transaction) would otherwise roll back every DML write when the connection is returned to
+     * the pool, silently losing the lease write while the local node still considers itself leader.
+     *
+     * @param conn an active database connection
+     * @throws SQLException if the commit fails
+     */
+    private void commitIfNeeded(Connection conn) throws SQLException {
+        if (!conn.getAutoCommit()) {
+            conn.commit();
+        }
     }
 
 

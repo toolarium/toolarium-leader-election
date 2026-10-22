@@ -343,6 +343,45 @@ public abstract class AbstractLeaderElectorTest {
 
 
     /**
+     * Test that the same elector instance can be reused after a close(): elect() → close() → elect() → close().
+     * Covers the re-initialization path (electionClosed reset, new latch, re-run of initializeImplementation).
+     *
+     * @throws Exception In case of an error
+     */
+    @Test
+    public void testReuseAfterClose() throws Exception {
+        ILeaderElector elector = createLeaderElector("testReuseAfterClose");
+
+        // First lifecycle
+        assertTrue(elector.elect(Duration.ofMillis(getInitWaitMillis())), "Must become leader on first elect()");
+        assertTrue(elector.isLeader());
+        elector.close();
+        assertFalse(elector.isLeader(), "Must not be leader after close()");
+
+        // Second lifecycle — same object instance
+        assertTrue(elector.elect(Duration.ofMillis(getInitWaitMillis())), "Must become leader again after close()");
+        assertTrue(elector.isLeader());
+        elector.close();
+        assertFalse(elector.isLeader());
+    }
+
+
+    /**
+     * Test that elect(null) delegates to elect() rather than throwing NullPointerException.
+     * This exercises the null-guard in the elect(Duration) overload.
+     *
+     * @throws Exception In case of an error
+     */
+    @Test
+    public void testElectWithNullTimeout() throws Exception {
+        ILeaderElector elector = createLeaderElector("testNullTimeout");
+        assertTrue(elector.elect((Duration) null), "elect(null) must delegate to elect() and return true");
+        assertTrue(elector.isLeader());
+        elector.close();
+    }
+
+
+    /**
      * Poll {@code condition} every 50 ms until it returns {@code true} or {@code timeoutMillis} elapses.
      *
      * @param condition the condition to poll

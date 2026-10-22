@@ -36,9 +36,17 @@ import org.slf4j.LoggerFactory;
  */
 public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderElectionConfiguration> {
     private static final Logger LOG = LoggerFactory.getLogger(NetworkLeaderElectorImpl.class);
+    /**
+     * Extra milliseconds added on top of {@code retryPeriod} to form the phantom-member stabilisation
+     * window.  The window must be strictly greater than {@code retryPeriod} so the scheduler's first
+     * tick (fired at {@code t ≈ retryPeriod}) is never considered definitive.  JGroups FD_ALL3 declares
+     * failure within ~3-4 s by default, which is always less than {@code retryPeriod + 2 s}.
+     */
+    private static final long PHANTOM_MEMBER_STABILIZE_EXTRA_MS = 2000L;
     private ScheduledExecutorService scheduledExecuterService;
     private ScheduledFuture<?> scheduledFuture;
     private JChannel channel;
+    private volatile long channelInitTime;
 
 
     /**
@@ -52,6 +60,7 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
         this.scheduledExecuterService = null;
         this.scheduledFuture = null;
         this.channel = null;
+        this.channelInitTime = 0L;
     }
 
 
@@ -69,12 +78,13 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
             throw new LeaderElectionException("Could not join network cluster [" + getLeaderElectionInformation().getUniqueName() + "]. Check previous log warnings for details.");
         }
 
-        // ch.connect() fires viewAccepted() synchronously, but the receiver guard (!isInitialized()) drops that initial event because isInitialized is still
-        // false here. Apply the established view directly so leadership is resolved before initialize() returns, without waiting for the first scheduler tick.
-        // Only signal "I am leader" synchronously: if this node is first in the initial view it can lead immediately.
-        // "Not leader" is NOT signalled here — phantom members from prior tests can appear first in the initial view and would
-        // prematurely count down the election latch with false. The scheduler (initialDelay=0) handles the "not leader" case
-        // after the first tick, by which time transient phantom members will have been detected as failed and removed.
+        // Record when the channel was initialised so isElectionResultDefinitive() can suppress
+        // premature "not leader" latch release during the JGroups phantom-member window (first 5 s).
+        channelInitTime = System.currentTimeMillis();
+
+        // ch.connect() fires viewAccepted() synchronously, but the receiver guard (!isInitialized()) drops that initial event
+        // because isInitialized is still false here. Apply the established view directly so a "is leader" result can unblock
+        // elect() without waiting for the first scheduler tick.
         View initialView = channel.getView();
         if (initialView != null && !initialView.getMembers().isEmpty()) {
             Address first = initialView.getMembers().get(0);
@@ -85,6 +95,22 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
 
         scheduledExecuterService = Executors.newScheduledThreadPool(1);
         scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(new NetworkLeaderElectionHandler(channel), 0, getLeaderElectionConfiguration().getRetryPeriod().toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl#isElectionResultDefinitive(boolean)
+     */
+    @Override
+    protected boolean isElectionResultDefinitive(boolean isLeaderResult) {
+        if (isLeaderResult) {
+            return true;
+        }
+        // Suppress "not leader" latch release during the phantom-member stabilisation window.
+        // JGroups FD_ALL3 removes stale members from prior JVM runs within ~3 s; we wait 5 s
+        // to be safe before treating a "not leader" view as the definitive election result.
+        return System.currentTimeMillis() - channelInitTime
+                >= getLeaderElectionConfiguration().getRetryPeriod().toMillis() + PHANTOM_MEMBER_STABILIZE_EXTRA_MS;
     }
 
 

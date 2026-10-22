@@ -34,16 +34,6 @@ public class SQLServerLeaderElectionDatabaseStructure extends JDBCLeaderElection
 
 
     /**
-     * @see com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure#createSQLIndex()
-     *     SQL Server PRIMARY KEY already creates a clustered index on the key column; no additional index is needed.
-     */
-    @Override
-    public String createSQLIndex() {
-        return null;
-    }
-
-
-    /**
      * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLRenameTimestampColumn()
      *     SQL Server does not support {@code RENAME COLUMN}; column renaming requires {@code sp_rename}.
      *     The bracket-quoted {@code [timestamp]} handles the reserved-word collision.
