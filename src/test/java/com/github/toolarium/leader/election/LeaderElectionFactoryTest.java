@@ -390,10 +390,13 @@ public class LeaderElectionFactoryTest {
         LOG.debug("->Check leader");
         assertFalse(leaderElector.isLeader());
         LOG.debug("->Elect leader");
-        // NETWORK strategy needs extra time due to JGroups UDP multicast congestion from prior tests
+        // NETWORK strategy needs extra time: JGroups UDP multicast stabilisation window is
+        // retryPeriod + 2 s = 3 s, but a previous test step (e.g. FILE testMultipleLeaders)
+        // can take up to 10 s, leaving phantom cluster members that need additional time to
+        // expire before this node can be elected.
         long electTimeoutMs = 8000L;
         if (LeaderElectionStrategy.NETWORK.equals(strategy)) {
-            electTimeoutMs = 15000L;
+            electTimeoutMs = 20000L;
         }
         assertTrue(leaderElector.elect(Duration.ofMillis(electTimeoutMs)));
         LOG.debug("->Elect leader (idempotent)");

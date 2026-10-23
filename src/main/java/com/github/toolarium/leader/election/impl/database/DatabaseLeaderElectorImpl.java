@@ -405,7 +405,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * @param currentLeader   the current DB row for this election group (owned by this instance)
      * @throws Exception on DB access errors
      */
-    private void handleOwnLeaderTick(long roundStartNanos, long dbNow, String uniqueName, String instanceId, LeaderElectorRecord currentLeader) throws Exception {
+    private boolean handleOwnLeaderTick(int mySession, long roundStartNanos, long dbNow, String uniqueName, String instanceId, LeaderElectorRecord currentLeader) throws Exception {
         long frd = currentLeader.getForceReleaseDeadline();
         if (!isLeader()) {
             // We hold the DB row but have already stepped down locally (renewDeadline exceeded or
@@ -425,10 +425,17 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 long expiryThreshold = dbNow - timeout;
                 boolean leaseExpired = currentLeader.getTimestamp() < expiryThreshold;
                 boolean forceReleaseReady = frd != 0 && frd <= dbNow;
-                if ((leaseExpired || forceReleaseReady) && !closing.get()) {
+                if (leaseExpired || forceReleaseReady) {
+                    if (closing.get()) {
+                        return true;
+                    }
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                     int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
-                    if (result > 0 && !closing.get()) {
+                    // Mid-round session check: discard result if close()+elect() cycled while blocked.
+                    if (mySession != sessionCounter || closing.get()) {
+                        return true;
+                    }
+                    if (result > 0) {
                         currentLeaderRecordId = newRecord.getId();
                         lastRenewalNanos = roundStartNanos;
                         setLeader(true, null);
@@ -455,17 +462,20 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             // forceRelease that set the deadline between our SELECT and UPDATE cannot be bypassed.
             LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
             int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
-            if (result > 0 && !closing.get()) {
+            // Mid-round session check: discard result if close()+elect() cycled while blocked.
+            if (mySession != sessionCounter || closing.get()) {
+                return true;
+            }
+            if (result > 0) {
                 currentLeaderRecordId = newRecord.getId();
                 lastRenewalNanos = roundStartNanos;
                 setLeader(true, null);
             } else {
                 currentLeaderRecordId = null;
-                if (result <= 0) {
-                    setLeader(false, null);
-                }
+                setLeader(false, null);
             }
         }
+        return false;
     }
 
 
@@ -609,6 +619,12 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 return;
             }
 
+            // Track whether THIS round wrote a new row (insert or steal from another instance).
+            // Used by the finally block: only rows created by THIS round are deleted there.
+            // Rows that existed before close() ran (renewals) are left for close() to remove
+            // AFTER closeInternal() finishes waiting for running runIfLeader tasks — preventing
+            // a split-brain window where another node acquires before this node's task stops.
+            boolean rowWrittenThisRound = false;
             try {
                 // Capture local nanoTime at the very start of the round so that lastRenewalNanos is never set to a time
                 // AFTER the DB write; using nanoTime() after the DB call would extend the local lease by the round-trip
@@ -618,16 +634,23 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 // writes and expiry checks use the same reference point without an extra DB round-trip on most ticks.
                 long dbNow = getDbNow();
                 LeaderElectorRecord currentLeader = leaderElectionDAO.selectLeaderByName(uniqueName);
+                // Mid-round session/closing guard: a round blocked in selectLeaderByName during a
+                // close()+elect() cycle must not contaminate the new session's state.
+                if (mySession != sessionCounter || closing.get()) {
+                    return;
+                }
 
                 if (currentLeader == null) {
-                    // No leader exists — try to become one. Re-check closing AFTER the SELECT so a tick that was already
-                    // running when close() fired cannot re-insert the row that close() just deleted.
-                    if (closing.get()) {
-                        return;
-                    }
+                    // No leader exists — try to become one.
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                     int result = leaderElectionDAO.insertLeader(newRecord);
-                    if (result > 0 && !closing.get()) {
+                    if (result > 0) {
+                        rowWrittenThisRound = true;
+                    }
+                    if (mySession != sessionCounter || closing.get()) {
+                        return;
+                    }
+                    if (result > 0) {
                         currentLeaderRecordId = newRecord.getId();
                         lastRenewalNanos = roundStartNanos;
                         setLeader(true, null);
@@ -635,7 +658,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         setLeader(false, null);
                     }
                 } else if (instanceId.equals(currentLeader.getInstance())) {
-                    handleOwnLeaderTick(roundStartNanos, dbNow, uniqueName, instanceId, currentLeader);
+                    if (handleOwnLeaderTick(mySession, roundStartNanos, dbNow, uniqueName, instanceId, currentLeader)) {
+                        return;
+                    }
                 } else {
                     // Another instance holds leadership — check expiry and force-release deadline.
                     long timeout = getLeaderElectionConfiguration().getTimeout().toMillis();
@@ -653,7 +678,13 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         }
                         LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                         int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
-                        if (result > 0 && !closing.get()) {
+                        if (result > 0) {
+                            rowWrittenThisRound = true;
+                        }
+                        if (mySession != sessionCounter || closing.get()) {
+                            return;
+                        }
+                        if (result > 0) {
                             currentLeaderRecordId = newRecord.getId();
                             lastRenewalNanos = System.nanoTime();
                             setLeader(true, null);
@@ -669,10 +700,12 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             } catch (Throwable e) {
                 handleTickError(e, uniqueName);
             } finally {
-                // If close() is in progress or has already returned, ensure any row written
-                // by this tick (e.g. insert or steal that was blocked past close()'s delete)
-                // is cleaned up so other nodes are not delayed by the full timeout.
-                if (closing.get()) {
+                // If close() is in progress AND this round wrote a new row (insert or steal from
+                // another instance), delete it so other nodes are not delayed by the full timeout.
+                // Renewal rows (updateLeaderTimestamp) are excluded: they existed before close()
+                // ran and are removed by close() itself only after closeInternal() has waited for
+                // all running runIfLeader tasks to finish, preventing the split-brain overlap.
+                if (closing.get() && rowWrittenThisRound) {
                     try {
                         leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
                     } catch (Exception ex) {
