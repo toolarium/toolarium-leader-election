@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.toolarium.leader.election.ILeaderElector;
@@ -16,12 +17,15 @@ import com.github.toolarium.leader.election.LeaderElectionFactory;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.dto.LeaderElectionStrategy;
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.database.dao.LeaderElectionDAO;
 import java.io.PrintWriter;
 import java.lang.reflect.Field;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -104,10 +108,14 @@ public class DatabaseLeaderElectorFixesTest {
     // -----------------------------------------------------------------------
 
     /**
-     * Verify that the scheduler steps down as leader when the time elapsed since the last
+     * Verify that the scheduler steps down as leader when the nanoTime elapsed since the last
      * successful DB renewal exceeds the renew deadline — before any DB call is attempted.
      * This guards against GC-pause / thread-starvation scenarios where the scheduler tick
      * fires late: the node must step down rather than holding a potentially expired lease.
+     *
+     * <p>The guard uses {@code System.nanoTime()} (via {@code lastRenewalNanos}) rather than
+     * {@code System.currentTimeMillis()} so that NTP wall-clock jumps do not cause spurious
+     * step-downs (see Issue #3 fix).
      *
      * @throws Exception in case of an error
      */
@@ -128,11 +136,11 @@ public class DatabaseLeaderElectorFixesTest {
                 LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("pretick-group"), config);
         assertTrue(elector.elect(), "Elector must establish leadership before test can proceed");
 
-        // Simulate a stalled scheduler: rewind lastSuccessfulRenewalAt to 4 s ago (> 3 s renewDeadline).
-        // The next tick fires ~1 s from now; at that point now - lastSuccessfulRenewalAt ≈ 5 s > 3 s.
-        Field f = elector.getClass().getDeclaredField("lastSuccessfulRenewalAt");
+        // Simulate a stalled scheduler: rewind lastRenewalNanos to 4 s ago (> 3 s renewDeadline.toNanos()).
+        // The pre-tick guard uses nanoTime so the wall clock is irrelevant.
+        Field f = elector.getClass().getDeclaredField("lastRenewalNanos");
         f.setAccessible(true);
-        f.setLong(elector, System.currentTimeMillis() - 4000L);
+        f.setLong(elector, System.nanoTime() - Duration.ofSeconds(4).toNanos());
 
         // Poll until the elector steps down (happens on the first tick, within ~1 s).
         // We check before the SECOND tick (~2 s from now) which would re-acquire leadership.
@@ -483,6 +491,329 @@ public class DatabaseLeaderElectorFixesTest {
                 "Scheduler thread must be a daemon so it does not prevent JVM shutdown");
 
         elector.close();
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Issue 1 (new): stale own row is re-acquired after local step-down.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Reproduce the exact scenario reported in the bug report:
+     * <ol>
+     *   <li>Elector A becomes leader.</li>
+     *   <li>The DB row is artificially aged past {@code timeout} (simulates an outage where
+     *       the row could not be renewed or deleted).</li>
+     *   <li>A's nanoTime-based renewal timestamp is made to look stale so the pre-tick guard
+     *       steps A down locally on the next scheduler tick.</li>
+     *   <li>On the following tick, A must detect that its own expired row is re-acquirable
+     *       and become leader again — without requiring a restart.</li>
+     * </ol>
+     * Prior to the fix, step 4 looped forever: {@code handleOwnLeaderTick()} found the own
+     * row, confirmed {@code !isLeader()}, cleared {@code currentLeaderRecordId}, and returned
+     * without re-acquiring. A remained leader-less until it was restarted.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testStaleOwnRowIsReacquiredAfterLocalStepDown() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:stale_own_row;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        // timeout=5 s, renewDeadline=3 s, retryPeriod=1 s
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(
+                Duration.ofSeconds(5), Duration.ofSeconds(3), Duration.ofSeconds(1));
+        config.setDataSource(ds);
+
+        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
+                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("stale-own-row-group"), config);
+        assertTrue(elector.elect(), "Must become leader initially");
+
+        // Age the DB row beyond timeout (lease_ts = now - 6 s, timeout = 5 s → expired).
+        try (Connection conn = ds.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(
+                     "UPDATE LeaderElection SET lease_ts = ? WHERE name = ?")) {
+            stmt.setLong(1, System.currentTimeMillis() - 6_000L);
+            stmt.setString(2, "stale-own-row-group");
+            stmt.executeUpdate();
+        }
+
+        // Simulate the pre-tick guard triggering: rewind lastRenewalNanos beyond renewDeadline.
+        Field nanoField = elector.getClass().getDeclaredField("lastRenewalNanos");
+        nanoField.setAccessible(true);
+        nanoField.setLong(elector, System.nanoTime() - Duration.ofSeconds(4).toNanos());
+
+        // Step 1: elector steps down locally (pre-tick guard, within ~1 s).
+        awaitCondition(() -> !elector.isLeader(), 2000L);
+        assertFalse(elector.isLeader(), "Elector must step down when renew deadline is exceeded");
+
+        // Step 2: elector re-acquires its own expired row (handleOwnLeaderTick, within ~2 s more).
+        awaitCondition(elector::isLeader, 4000L);
+        assertTrue(elector.isLeader(),
+                "Elector must regain leadership by re-acquiring its own expired DB row (Issue 1 fix)");
+
+        elector.close();
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Issue 2 (new): no spurious interrupt leaks to caller after task finishes.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verify that the {@link com.github.toolarium.leader.election.impl.LeaderLeaseMonitor}
+     * cannot send a late interrupt to the caller's thread after a {@code runIfLeader} task
+     * has already returned.
+     *
+     * <p>The race: after the task returns, the monitor may still hold a reference to the
+     * lease from a previous snapshot iteration, call {@code isValid()==false}, and invoke
+     * {@code interruptIfRunning()} — hitting the caller thread while it is already in the
+     * <em>next</em> unrelated job.  The fix adds a {@code finished} flag set inside the
+     * same {@code synchronized(lease)} block that inspects the interrupt status, making
+     * {@code interruptIfRunning()} a no-op once the task is done.
+     *
+     * <p>Strategy: run 40 quick tasks with a 110 ms gap between them so the monitor
+     * (period = 100 ms) fires at least once in each gap.  Without the fix the spurious
+     * interrupt would appear within a handful of iterations.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testNoSpuriousInterruptAfterTaskFinishesUnderMonitorLoad() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:no_interrupt;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        ILeaderElector elector = createElector(ds, "no-interrupt-group", 30);
+        assertTrue(elector.elect());
+
+        try {
+            for (int i = 0; i < 40; i++) {
+                boolean ran = elector.runIfLeader("instant-task-" + i, lease -> { /* returns immediately */ });
+                assertTrue(ran, "Task must run while leader (iteration " + i + ")");
+
+                // Sleep past the monitor's CHECK_PERIOD_MILLIS (100 ms) to give it a chance to
+                // fire after the task has finished but before markFinished() is seen. Without the
+                // fix, interruptIfRunning() would land on the current thread here.
+                Thread.sleep(110L);
+
+                assertFalse(Thread.currentThread().isInterrupted(),
+                        "Caller thread must not carry a spurious interrupt from the monitor "
+                        + "after runIfLeader completes (iteration " + i + ")");
+            }
+        } finally {
+            elector.close();
+            Thread.interrupted(); // clear any interrupt from close()
+        }
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Issue 3 (new): pre-tick guard is NOT triggered by a wall-clock jump.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verify that a stale {@code lastSuccessfulRenewalAt} wall-clock timestamp does NOT
+     * cause the pre-tick guard to step the elector down.
+     * After the Issue 3 fix the guard exclusively uses {@code lastRenewalNanos}
+     * ({@code System.nanoTime()}), so a wall-clock jump forward — simulated here by making
+     * {@code lastSuccessfulRenewalAt} appear very old — must have no effect.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testPreTickGuardNotTriggeredByWallClockSkew() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:wall_clock_skew;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(
+                Duration.ofSeconds(10), Duration.ofSeconds(6), Duration.ofSeconds(1));
+        config.setDataSource(ds);
+
+        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
+                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("wall-clock-skew-group"), config);
+        assertTrue(elector.elect());
+
+        // Simulate a wall-clock jump: set lastSuccessfulRenewalAt to 30 s in the past.
+        // The old (wall-clock) guard would have stepped the node down immediately.
+        Field wallField = elector.getClass().getDeclaredField("lastSuccessfulRenewalAt");
+        wallField.setAccessible(true);
+        wallField.setLong(elector, System.currentTimeMillis() - 30_000L);
+
+        // lastRenewalNanos is left untouched — the nanoTime-based guard must NOT fire.
+        Thread.sleep(1500L); // wait past one retryPeriod so at least one tick runs
+
+        assertTrue(elector.isLeader(),
+                "Elector must remain leader: wall-clock skew must not trigger the pre-tick step-down guard");
+
+        elector.close();
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Issue 5 (new): allowDdl=false — fail-fast instead of silent DDL execution.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verify that with {@code allowDdl=false}, calling {@code elect()} when the
+     * leader-election table does not yet exist throws a descriptive
+     * {@link LeaderElectionException} naming the table and mentioning {@code allowDdl=false},
+     * instead of silently executing {@code CREATE TABLE}.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testAllowDdlFalseFailsFastOnMissingTable() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:no_ddl_table;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(2);
+        config.setDataSource(ds);
+        config.setAllowDdl(false); // DDL forbidden
+
+        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
+                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("no-ddl-group"), config);
+
+        LeaderElectionException ex = assertThrows(LeaderElectionException.class, elector::elect,
+                "elect() must throw when table is missing and allowDdl=false");
+        String msg = ex.getMessage() + (ex.getCause() != null ? " " + ex.getCause().getMessage() : "");
+        assertTrue(msg.contains("allowDdl=false"),
+                "Error must mention 'allowDdl=false', was: " + msg);
+    }
+
+
+    /**
+     * Verify that with {@code allowDdl=false}, calling {@link LeaderElectionDAO#init()}
+     * when the table exists but the {@code force_release_deadline} column is missing throws
+     * a descriptive {@link SQLException} that names the missing column and mentions
+     * {@code allowDdl=false}, together with the DDL to apply manually.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testAllowDdlFalseFailsOnMissingColumn() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:no_ddl_col;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        // Create the table without the force_release_deadline column (pre-v1.2 schema).
+        try (Connection conn = ds.getConnection();
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE LeaderElection_noDdl "
+                + "(id varchar(36) not NULL, name varchar(512) not NULL, "
+                + "instance varchar(255), username varchar(255), lease_ts bigint not NULL, "
+                + "PRIMARY KEY (name))");
+        }
+
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(2);
+        config.setDataSource(ds);
+        com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure struct =
+                new com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure();
+        struct.setTableName("LeaderElection_noDdl");
+        config.setLeaderElectionDatabaseStructure(struct);
+        config.setAllowDdl(false);
+
+        LeaderElectionDAO dao = new LeaderElectionDAO(config);
+        SQLException ex = assertThrows(SQLException.class, dao::init,
+                "init() must throw when force_release_deadline is missing and allowDdl=false");
+        assertTrue(ex.getMessage().contains("allowDdl=false"),
+                "Error must mention 'allowDdl=false', was: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("force_release_deadline"),
+                "Error must name the missing column, was: " + ex.getMessage());
+
+        // Cleanup
+        try (Connection conn = ds.getConnection();
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("DROP TABLE LeaderElection_noDdl");
+        }
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Issue 6 (new): close() completes within a single closeTimeout budget.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verify that {@link DatabaseLeaderElectorImpl#close()} completes within
+     * {@code 2 × closeTimeout} even when there is a running scheduler tick,
+     * and that concurrent calls from two threads do not deadlock.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testCloseCompletesWithinSingleDeadline() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:close_deadline;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(10);
+        config.setDataSource(ds);
+        config.setCloseTimeout(Duration.ofSeconds(2));
+
+        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
+                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("close-deadline-group"), config);
+        assertTrue(elector.elect());
+
+        long start = System.nanoTime();
+        elector.close();
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        // With a single-deadline close, both the scheduler wait and the task-cleanup wait
+        // share the 2 s budget rather than each getting their own 2 s.
+        assertTrue(elapsedMs < 4_500L,
+                "close() must complete within 2 × closeTimeout (4 s), elapsed: " + elapsedMs + " ms");
+    }
+
+
+    /**
+     * Verify that calling {@link ILeaderElector#close()} concurrently from two threads
+     * does not deadlock and both calls return without throwing.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testConcurrentCloseDoesNotDeadlock() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:concurrent_close;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        ILeaderElector elector = createElector(ds, "concurrent-close-group", 5);
+        assertTrue(elector.elect());
+
+        CountDownLatch startGate = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(2);
+        AtomicInteger errors = new AtomicInteger(0);
+
+        Runnable closer = () -> {
+            try {
+                startGate.await();
+                elector.close();
+            } catch (Exception e) {
+                errors.incrementAndGet();
+            } finally {
+                done.countDown();
+            }
+        };
+
+        Thread t1 = new Thread(closer, "close-thread-1");
+        Thread t2 = new Thread(closer, "close-thread-2");
+        t1.start();
+        t2.start();
+        startGate.countDown();
+
+        assertTrue(done.await(10_000L, TimeUnit.MILLISECONDS),
+                "Both close() calls must complete within 10 s");
+        assertEquals(0, errors.get(), "close() must not throw on concurrent invocation");
     }
 
 

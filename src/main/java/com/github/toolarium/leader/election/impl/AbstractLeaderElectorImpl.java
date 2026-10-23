@@ -167,6 +167,21 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      */
     @Override
     public void close() throws LeaderElectionException {
+        closeInternal(leaderElectionConfiguration.getCloseTimeout().toMillis());
+    }
+
+
+    /**
+     * Shared close logic used by {@link #close()} and by subclasses that compute a single
+     * close deadline across several steps. Subclasses should call this instead of
+     * {@link #close()} when they have already spent part of the close budget waiting for
+     * their own resources (e.g. a scheduler executor) so that the total close time does
+     * not exceed the configured {@code closeTimeout}.
+     *
+     * @param writeLockTimeoutMillis maximum milliseconds to wait for the lifecycle write lock
+     * @throws LeaderElectionException if cleanup fails
+     */
+    void closeInternal(long writeLockTimeoutMillis) throws LeaderElectionException {
         boolean wasLeader = Boolean.TRUE.equals(isLeader);
 
         // Signal any running tasks: setting isLeader=null makes isValid() return false,
@@ -183,7 +198,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         Lock writeLock = lifecycleLock.writeLock();
         boolean locked = false;
         try {
-            locked = writeLock.tryLock(leaderElectionConfiguration.getCloseTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            locked = writeLock.tryLock(Math.max(0L, writeLockTimeoutMillis), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -268,12 +283,16 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                 // Placing this after unregister closes the race where the monitor fires
                 // just after task.run() returns and sets interruptedByMonitor=true.
                 leaseMonitor.unregister(lease);
-                // Synchronize on the lease to close the race where the monitor has already
-                // set interruptedByMonitor=true (via compareAndSet) but has not yet called
-                // taskThread.interrupt(). Without this, Thread.interrupted() could clear a
-                // flag that was never set, allowing the monitor's subsequent interrupt() to
-                // land on the next unrelated task running on this thread.
+                // Synchronize on the lease to close two races:
+                // 1. The monitor has already read the lease from its snapshot (before unregister),
+                //    called isValid()=false, and is about to call interruptIfRunning(). Without
+                //    markFinished() the monitor would interrupt the caller's thread AFTER the task
+                //    is done, corrupting the interrupt state for the next unrelated job.
+                // 2. The monitor may have set interruptedByMonitor=true but not yet called
+                //    taskThread.interrupt(). Thread.interrupted() below clears the flag
+                //    atomically; markFinished() ensures no late interrupt follows.
                 synchronized (lease) {
+                    lease.markFinished();
                     boolean wasInterrupted = Thread.interrupted();
                     if (wasInterrupted && !lease.wasInterruptedByMonitor()) {
                         Thread.currentThread().interrupt();

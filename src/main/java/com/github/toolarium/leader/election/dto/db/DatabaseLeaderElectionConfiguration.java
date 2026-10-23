@@ -29,6 +29,10 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
 
     private DataSource dataSource;
     private LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
+    // When false, elect() fails fast with a clear error instead of executing CREATE TABLE or
+    // ALTER TABLE at startup. Set to false for environments where the application user has no
+    // DDL rights or when the table is managed by an external migration tool (Flyway, Liquibase).
+    private boolean allowDdl = true;
 
 
     /**
@@ -105,6 +109,35 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
      */
     public DatabaseLeaderElectionConfiguration setLeaderElectionDatabaseStructure(LeaderElectionDatabaseStructure leaderElectionDatabaseStructure) {
         this.leaderElectionDatabaseStructure = leaderElectionDatabaseStructure;
+        return this;
+    }
+
+
+    /**
+     * Returns whether the DAO is permitted to execute DDL statements (CREATE TABLE, ALTER TABLE)
+     * at startup. Defaults to {@code true}.
+     *
+     * <p>Set to {@code false} when the application database user has no DDL rights, or when the
+     * table is managed by an external schema-migration tool (Flyway, Liquibase, etc.). With DDL
+     * disabled, {@code elect()} throws a descriptive error instead of attempting DDL, and the
+     * error message includes the expected DDL for the missing table or column so operators can
+     * apply it manually.
+     *
+     * @return {@code true} if DDL is allowed, {@code false} if DDL is forbidden
+     */
+    public boolean isAllowDdl() {
+        return allowDdl;
+    }
+
+
+    /**
+     * Set whether the DAO may execute DDL statements at startup.
+     *
+     * @param allowDdl {@code false} to disable runtime DDL; {@code true} (default) to allow it
+     * @return this configuration instance for method chaining
+     */
+    public DatabaseLeaderElectionConfiguration setAllowDdl(boolean allowDdl) {
+        this.allowDdl = allowDdl;
         return this;
     }
 

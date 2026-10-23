@@ -56,6 +56,18 @@ public class LeaderElectionDAO {
         // which could exceed renewDeadline and create a split-brain window.
         long renewMillis = leaderElectionConfiguration.getRenewDeadline().toMillis();
         this.queryTimeoutSeconds = Math.max(1, (int) (renewMillis / 3 / 1000));
+        // Warn if the renew deadline is below 3 s. The minimum per-statement timeout is 1 s
+        // (JDBC setQueryTimeout is in whole seconds), so up to 3 statements per tick consume
+        // up to 3 s total — exceeding the renew deadline and delaying step-down detection.
+        // Also ensure the DataSource/connection pool is configured with an acquisition timeout;
+        // pools such as Agroal wait indefinitely by default, blocking the election tick.
+        if (renewMillis < 3_000) {
+            LOG.warn("renewDeadline [{}ms] is below the recommended minimum of 3 000 ms. "
+                    + "Each election tick issues up to 3 sequential DB statements, each with a "
+                    + "minimum 1 s timeout; total per-tick latency can exceed the renew deadline. "
+                    + "Recommended: renewDeadline >= 3 s. Also configure a connection-acquisition "
+                    + "timeout on the DataSource to prevent indefinite blocking.", renewMillis);
+        }
     }
 
 
@@ -71,6 +83,12 @@ public class LeaderElectionDAO {
             ensureStructure(conn);
 
             if (!existDatabaseTable(conn)) {
+                if (!leaderElectionConfiguration.isAllowDdl()) {
+                    throw new SQLException("Leader election table '" + leaderElectionDatabaseStructure.getTableName()
+                                            + "' does not exist and DDL is disabled (allowDdl=false). "
+                                            + "Create the table manually or call setAllowDdl(true) on the configuration. "
+                                            + "Expected DDL: " + leaderElectionDatabaseStructure.createSQLTable());
+                }
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Creating leader election table {}...", leaderElectionDatabaseStructure.getTableName());
                 }
@@ -444,11 +462,18 @@ public class LeaderElectionDAO {
      * @throws SQLException if migration fails or required columns are missing
      */
     protected void validateAndMigrateSchema(Connection conn) throws SQLException {
+        boolean allowDdl = leaderElectionConfiguration.isAllowDdl();
         Set<String> columns = getExistingColumns(conn);
 
         // Auto-migrate: rename legacy 'timestamp' column to 'lease_ts'
         if (columns.contains("timestamp") && !columns.contains("lease_ts")) {
             String tableName = leaderElectionDatabaseStructure.getTableName();
+            if (!allowDdl) {
+                throw new SQLException("Schema migration required for table '" + tableName
+                                        + "': column 'timestamp' must be renamed to 'lease_ts', but DDL is disabled "
+                                        + "(allowDdl=false). Apply the migration manually: "
+                                        + leaderElectionDatabaseStructure.createSQLRenameTimestampColumn());
+            }
             LOG.info("Migrating schema: renaming column 'timestamp' to 'lease_ts' in table {}...", tableName);
             try {
                 try (Statement stmt = conn.createStatement()) {
@@ -472,6 +497,12 @@ public class LeaderElectionDAO {
         // Auto-migrate: add force_release_deadline column if missing (schema v1 → v2)
         if (!columns.contains("force_release_deadline")) {
             String tableName = leaderElectionDatabaseStructure.getTableName();
+            if (!allowDdl) {
+                throw new SQLException("Schema migration required for table '" + tableName
+                                        + "': column 'force_release_deadline' is missing, but DDL is disabled "
+                                        + "(allowDdl=false). Apply the migration manually: "
+                                        + leaderElectionDatabaseStructure.createSQLAddForceReleaseDeadlineColumn());
+            }
             LOG.info("Migrating schema: adding column 'force_release_deadline' to table {}...", tableName);
             try {
                 try (Statement stmt = conn.createStatement()) {

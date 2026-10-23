@@ -26,6 +26,10 @@ final class DefaultLeaderLease implements ILeaderLease {
     private final Thread taskThread;
     private final long capturedTerm;
     private final AtomicBoolean interruptedByMonitor;
+    // Guarded by synchronized(this). Set to true inside the same lock that clears the interrupt
+    // flag in runIfLeader(), preventing the monitor from sending a late interrupt after the task
+    // has already finished and the thread has moved on to unrelated work.
+    private boolean finished;
 
 
     /**
@@ -48,6 +52,7 @@ final class DefaultLeaderLease implements ILeaderLease {
         this.taskThread = taskThread;
         this.capturedTerm = capturedTerm;
         this.interruptedByMonitor = new AtomicBoolean(false);
+        this.finished = false;
     }
 
 
@@ -110,11 +115,27 @@ final class DefaultLeaderLease implements ILeaderLease {
 
 
     /**
+     * Mark this lease as finished. Called inside {@code synchronized(this)} in
+     * {@code runIfLeader()}'s finally block after the task has returned but before the
+     * interrupt flag is inspected. Once marked finished, {@link #interruptIfRunning()}
+     * becomes a no-op, preventing a late monitor interrupt from landing on the next
+     * unrelated job running on the same thread.
+     */
+    synchronized void markFinished() {
+        finished = true;
+    }
+
+
+    /**
      * Interrupt the task thread at most once.
      * Subsequent calls from the {@link LeaderLeaseMonitor} (every 100 ms) are ignored
      * after the first interrupt has been sent, preventing repeated interrupts during cleanup.
+     * Also a no-op once {@link #markFinished()} has been called.
      */
     synchronized void interruptIfRunning() {
+        if (finished) {
+            return;
+        }
         if (interruptedByMonitor.compareAndSet(false, true) && taskThread.isAlive()) {
             taskThread.interrupt();
         }

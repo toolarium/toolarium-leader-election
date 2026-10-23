@@ -56,8 +56,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private static final long MAX_BACKOFF_MILLIS = 60_000L;
     // Refresh the DB clock offset every CLOCK_SYNC_TICKS ticks; between syncs use System.currentTimeMillis() + dbClockOffsetMillis to avoid an extra DB round-trip per tick.
     private static final int CLOCK_SYNC_TICKS = 5;
-    private ScheduledExecutorService scheduledExecuterService;
-    private ScheduledFuture<?> scheduledFuture;
+    // volatile: written by elect() (initialization thread) and read by close() (potentially
+    // from another thread, e.g. the JVM shutdown hook registered by LeaderElectionScheduler).
+    private volatile ScheduledExecutorService scheduledExecuterService;
+    private volatile ScheduledFuture<?> scheduledFuture;
     private LeaderElectionDAO leaderElectionDAO;
     private volatile String currentLeaderRecordId;
     private volatile int consecutiveFailures;
@@ -192,6 +194,11 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             return;
         }
 
+        // Compute a single deadline for the whole close() operation so the scheduler wait
+        // and the task-cleanup wait together do not exceed closeTimeout.
+        long closeMillis = getLeaderElectionConfiguration().getCloseTimeout().toMillis();
+        long closeDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeMillis);
+
         // Cancel the scheduler so no new ticks start.
         if (scheduledFuture != null) {
             try {
@@ -205,19 +212,22 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         if (scheduledExecuterService != null) {
             try {
                 scheduledExecuterService.shutdown();
-                long closeMillis = getLeaderElectionConfiguration().getCloseTimeout().toMillis();
-                scheduledExecuterService.awaitTermination(closeMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
+                long remainingMs = TimeUnit.NANOSECONDS.toMillis(closeDeadlineNanos - System.nanoTime());
+                if (remainingMs > 0) {
+                    scheduledExecuterService.awaitTermination(remainingMs, TimeUnit.MILLISECONDS);
+                }
             } catch (Exception e) {
                 // NOP
             }
             scheduledExecuterService = null;
         }
 
-        // Signal running tasks and wait for them to finish (via super.close()), BEFORE
-        // releasing the DB record. This prevents a window where the DB row is already
-        // gone (another node can insert) while our task still holds the lease as valid.
+        // Signal running tasks and wait for them to finish using the remaining budget.
+        // This prevents a window where the DB row is already gone (another node can insert)
+        // while our task still holds the lease as valid.
+        long remainingForSuper = TimeUnit.NANOSECONDS.toMillis(closeDeadlineNanos - System.nanoTime());
         try {
-            super.close();
+            super.closeInternal(Math.max(0L, remainingForSuper));
         } finally {
             // Delete own leader record so another node can take over immediately.
             if (currentLeaderRecordId != null) {
@@ -308,26 +318,35 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     /**
      * Pre-tick renew-deadline guard: called BEFORE any DB operation so a hanging or
      * unavailable database cannot keep this node as leader indefinitely.
-     * Uses {@code super.isLeader()} (the stored flag from {@code AbstractLeaderElectorImpl})
+     *
+     * <p>Uses {@code super.isLeader()} (the stored flag from {@code AbstractLeaderElectorImpl})
      * rather than the overridden {@link #isLeader()} so the check fires even when the
      * nanoTime-based expiry already returned {@code false} on the previous call.
      *
+     * <p>Uses {@code System.nanoTime()} instead of {@code System.currentTimeMillis()} so that
+     * a wall-clock jump forward (NTP correction, VM resume after suspend) does not cause a
+     * healthy leader to step down prematurely. The nanoTime reference is consistent with the
+     * overridden {@link #isLeader()} check that uses the same clock.
+     *
+     * <p>The DB row is intentionally <em>not</em> deleted here. After step-down,
+     * {@code handleOwnLeaderTick()} will find the own row and re-acquire it once
+     * {@code lease_ts + timeout} has passed (Issue 1 fix), giving any in-flight
+     * {@code runIfLeader} task the full {@code (timeout - renewDeadline)} window to stop
+     * before another node can acquire. Deleting here would be inconsistent with the
+     * keep-and-re-acquire path and also subject to a wall-clock race.
+     *
      * @param uniqueName the election group name
-     * @param instanceId this node's instance identifier
+     * @param instanceId this node's instance identifier (unused, kept for symmetry)
      * @return {@code true} if the caller should return immediately (leadership was relinquished)
      */
     private boolean checkPreTickRenewDeadline(String uniqueName, String instanceId) {
-        if (super.isLeader() && lastSuccessfulRenewalAt > 0) {
-            long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
-            if (System.currentTimeMillis() - lastSuccessfulRenewalAt > renewDeadlineMillis) {
+        if (super.isLeader() && lastRenewalNanos > 0) {
+            if (System.nanoTime() - lastRenewalNanos > getLeaderElectionConfiguration().getRenewDeadline().toNanos()) {
                 LOG.info("Renew deadline exceeded (pre-tick) for [{}], stepping down as leader.", uniqueName);
                 currentLeaderRecordId = null;
                 setLeader(false, null);
-                try {
-                    leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
-                } catch (Exception del) {
-                    LOG.warn("Could not delete leader record during voluntary step-down for [{}]: {}", uniqueName, del.getMessage());
-                }
+                // Row stays in the DB — handleOwnLeaderTick() will re-acquire it once it
+                // has expired, keeping the behaviour consistent with the non-pre-tick path.
                 return true;
             }
         }
@@ -344,10 +363,11 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * @param dbNow           current DB-clock epoch milliseconds
      * @param uniqueName      the election group name
      * @param instanceId      this node's instance identifier
-     * @param frd             the {@code force_release_deadline} value from the DB row (0 = not set)
+     * @param currentLeader   the current DB row for this election group (owned by this instance)
      * @throws Exception on DB access errors
      */
-    private void handleOwnLeaderTick(long roundStartNanos, long dbNow, String uniqueName, String instanceId, long frd) throws Exception {
+    private void handleOwnLeaderTick(long roundStartNanos, long dbNow, String uniqueName, String instanceId, LeaderElectorRecord currentLeader) throws Exception {
+        long frd = currentLeader.getForceReleaseDeadline();
         if (!isLeader()) {
             // We hold the DB row but have already stepped down locally (renewDeadline exceeded or
             // force-release processed on a previous tick). Ensure the stored flag is false so the
@@ -357,11 +377,32 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 // Force-release deadline still in the future — keep the row as a guard so no
                 // other node can acquire before the deadline elapses. Nothing to do this tick.
             } else {
-                // Time-based step-down: the local lease expired (renewDeadline exceeded).
-                // Do NOT delete the row — let it age out naturally so a new node steals it only
-                // after the full timeout, giving any in-flight runIfLeader task the complete
-                // (timeout - renewDeadline) window to notice and stop.
-                currentLeaderRecordId = null;
+                // Check whether the lease has already expired. If so, re-acquire it immediately
+                // using the same conditional UPDATE as stealLeadership so no other node wins the
+                // race. This fixes the case where the DB was unreachable when the pre-tick guard
+                // stepped us down: the delete failed, the row stayed, and without this path we
+                // would loop here forever with isLeader()=false and no one taking over.
+                long timeout = getLeaderElectionConfiguration().getTimeout().toMillis();
+                long expiryThreshold = dbNow - timeout;
+                boolean leaseExpired = currentLeader.getTimestamp() < expiryThreshold;
+                boolean forceReleaseReady = frd != 0 && frd <= dbNow;
+                if ((leaseExpired || forceReleaseReady) && !closing.get()) {
+                    LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
+                    int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
+                    if (result > 0) {
+                        currentLeaderRecordId = newRecord.getId();
+                        lastSuccessfulRenewalAt = System.currentTimeMillis();
+                        lastRenewalNanos = roundStartNanos;
+                        setLeader(true, null);
+                    } else {
+                        currentLeaderRecordId = null;
+                    }
+                } else {
+                    // Lease still within timeout window — keep the row as a guard until it ages
+                    // out, giving any in-flight runIfLeader task the (timeout - renewDeadline)
+                    // window to notice and stop before another node can acquire.
+                    currentLeaderRecordId = null;
+                }
             }
         } else if (frd != 0) {
             // Admin requested force-release — step down without renewing.
@@ -420,9 +461,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         // voluntarily step down so another node can take over before the full timeout elapses.
         // Uses super.isLeader() (stored flag) — not the overridden isLeader() — for the same
         // reason as checkPreTickRenewDeadline: the nanoTime check may already be false.
-        long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
-        if (super.isLeader() && lastSuccessfulRenewalAt > 0
-                && System.currentTimeMillis() - lastSuccessfulRenewalAt > renewDeadlineMillis) {
+        // Uses nanoTime (same as the isLeader() override and checkPreTickRenewDeadline) so that
+        // a wall-clock jump cannot trigger a spurious step-down.
+        if (super.isLeader() && lastRenewalNanos > 0
+                && System.nanoTime() - lastRenewalNanos > getLeaderElectionConfiguration().getRenewDeadline().toNanos()) {
             LOG.info("Renew deadline exceeded for [{}], stepping down as leader.", uniqueName);
             currentLeaderRecordId = null;
             setLeader(false, null);
@@ -542,7 +584,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         setLeader(false, null);
                     }
                 } else if (instanceId.equals(currentLeader.getInstance())) {
-                    handleOwnLeaderTick(roundStartNanos, dbNow, uniqueName, instanceId, currentLeader.getForceReleaseDeadline());
+                    handleOwnLeaderTick(roundStartNanos, dbNow, uniqueName, instanceId, currentLeader);
                 } else {
                     // Another instance holds leadership — check expiry and force-release deadline.
                     long timeout = getLeaderElectionConfiguration().getTimeout().toMillis();
