@@ -559,6 +559,69 @@ public class DatabaseLeaderElectorFixesTest {
 
 
     // -----------------------------------------------------------------------
+    // Issue 2 (new): close() with exhausted budget still interrupts running task.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verify that {@code close()} calls {@code signalLeaderInvalid()} at the very start
+     * so that the {@link com.github.toolarium.leader.election.impl.LeaderLeaseMonitor}
+     * can interrupt a blocking {@code runIfLeader} task WHILE the scheduler drains,
+     * even if the scheduler wait consumes the whole close budget.
+     *
+     * <p>The task blocks in {@code sleep()} indefinitely; only an interrupt wakes it.
+     * With the fix the monitor sees {@code isValid()==false} within 100 ms of
+     * {@code close()} and interrupts the task; without the fix the monitor only gets the
+     * signal after {@code awaitTermination()} finishes, which is after the budget.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testCloseSignalsLeaseInvalidBeforeSchedulerDrain() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:early_signal;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        // Large timeout so the DB row does not expire during the test.
+        ILeaderElector elector = createElector(ds, "early-signal-group", 30);
+        assertTrue(elector.elect());
+
+        CountDownLatch taskStarted = new CountDownLatch(1);
+        CountDownLatch taskFinished = new CountDownLatch(1);
+
+        Thread taskThread = new Thread(() -> {
+            try {
+                elector.runIfLeader("blocking-task", lease -> {
+                    taskStarted.countDown();
+                    try {
+                        Thread.sleep(60_000L); // blocks until interrupted
+                    } catch (InterruptedException ignored) {
+                        // expected: monitor interrupts via isValid()==false
+                    }
+                });
+            } catch (Exception ignored) {
+            } finally {
+                taskFinished.countDown();
+            }
+        }, "blocking-task-thread");
+        taskThread.start();
+
+        assertTrue(taskStarted.await(2_000L, TimeUnit.MILLISECONDS), "Task must start");
+
+        // close() must interrupt the task via signalLeaderInvalid() + monitor (≤ 100 ms + margin).
+        // Total: well under 1 s. Without the fix it would take the full closeTimeout.
+        long start = System.nanoTime();
+        elector.close();
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        assertTrue(taskFinished.await(1_500L, TimeUnit.MILLISECONDS),
+                "Task must finish after monitor interrupt, but was still running after 1.5 s");
+        assertTrue(elapsedMs < 3_000L,
+                "close() must complete quickly when task is interrupted by monitor, took " + elapsedMs + " ms");
+    }
+
+
+    // -----------------------------------------------------------------------
     // Issue 2 (new): no spurious interrupt leaks to caller after task finishes.
     // -----------------------------------------------------------------------
 
@@ -608,6 +671,71 @@ public class DatabaseLeaderElectorFixesTest {
             elector.close();
             Thread.interrupted(); // clear any interrupt from close()
         }
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Issue 5 (new): nanoTime Long.MIN_VALUE sentinel — step-down guard must
+    // not fire when lastRenewalNanos is NANOS_NOT_SET.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verify that the pre-tick step-down guard does <em>not</em> fire when
+     * {@code lastRenewalNanos} holds the {@code Long.MIN_VALUE} ("not set") sentinel.
+     *
+     * <p>Before the fix, the guard used {@code lastRenewalNanos > 0} as "has been set".
+     * On platforms where {@code System.nanoTime()} returns a negative value (allowed by
+     * the JDK specification), a real renewal would produce a value ≤ 0, permanently
+     * disabling the guard.  The fix uses {@code Long.MIN_VALUE} as a never-colliding
+     * sentinel so the guard fires whenever a real nanoTime value (positive OR negative)
+     * has been written.
+     *
+     * <p>This test injects {@code Long.MIN_VALUE} directly and confirms the elector
+     * stays leader, because {@code Long.MIN_VALUE != Long.MIN_VALUE} is false → guard
+     * skipped. It also injects a small negative value (valid on some platforms) and
+     * confirms the guard fires correctly once the elapsed nanoTime exceeds renewDeadline.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testNanoTimeSentinelDoesNotTriggerStepDown() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:nano_sentinel;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+
+        DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(
+                Duration.ofSeconds(10), Duration.ofSeconds(6), Duration.ofSeconds(1));
+        config.setDataSource(ds);
+
+        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
+                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("nano-sentinel-group"), config);
+        assertTrue(elector.elect());
+
+        // Inject NANOS_NOT_SET = Long.MIN_VALUE — should NOT trigger the guard.
+        Field f = elector.getClass().getDeclaredField("lastRenewalNanos");
+        f.setAccessible(true);
+        f.setLong(elector, Long.MIN_VALUE);
+
+        Thread.sleep(1_500L); // two retryPeriods — enough for a tick to run
+        assertTrue(elector.isLeader(),
+                "Guard must not fire when lastRenewalNanos == Long.MIN_VALUE (NANOS_NOT_SET sentinel)");
+
+        // Now inject a small negative value representing a real (valid) nanoTime.
+        // Elapsed = now - lastRenewalNanos ≈ (positive now) - (small negative) > Long.MAX_VALUE/2
+        // which overflows. However, the check is:
+        //   System.nanoTime() - lastRenewalNanos > renewDeadline.toNanos()
+        // With lastRenewalNanos = -1 and nanoTime ≈ some positive value T:
+        //   T - (-1) = T + 1  → if T > renewDeadline.toNanos()-1 it fires.
+        // For a typical JVM the nanoTime is in the billions of nanoseconds, >> 6s.
+        // So setting it to -1 (not NANOS_NOT_SET) should trigger the guard.
+        f.setLong(elector, -1L); // valid negative nanoTime — NOT the sentinel
+
+        awaitCondition(() -> !elector.isLeader(), 2_500L);
+        assertFalse(elector.isLeader(),
+                "Guard must fire when lastRenewalNanos == -1 (valid negative nanoTime, not the sentinel)");
+
+        elector.close();
     }
 
 

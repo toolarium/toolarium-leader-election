@@ -56,6 +56,11 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private static final long MAX_BACKOFF_MILLIS = 60_000L;
     // Refresh the DB clock offset every CLOCK_SYNC_TICKS ticks; between syncs use System.currentTimeMillis() + dbClockOffsetMillis to avoid an extra DB round-trip per tick.
     private static final int CLOCK_SYNC_TICKS = 5;
+    // Sentinel for lastRenewalNanos and backoffUntil meaning "not yet set".
+    // Long.MIN_VALUE is used rather than 0 because System.nanoTime() has an arbitrary origin
+    // and may legally return negative values; using 0 as "not set" silently disables the
+    // step-down guards on such platforms.
+    private static final long NANOS_NOT_SET = Long.MIN_VALUE;
     // volatile: written by elect() (initialization thread) and read by close() (potentially
     // from another thread, e.g. the JVM shutdown hook registered by LeaderElectionScheduler).
     private volatile ScheduledExecutorService scheduledExecuterService;
@@ -85,9 +90,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         this.leaderElectionDAO = new LeaderElectionDAO(getLeaderElectionConfiguration());
         this.currentLeaderRecordId = null;
         this.consecutiveFailures = 0;
-        this.backoffUntil = 0;
+        this.backoffUntil = NANOS_NOT_SET;
         this.lastSuccessfulRenewalAt = 0;
-        this.lastRenewalNanos = 0L;
+        this.lastRenewalNanos = NANOS_NOT_SET;
         this.dbClockOffsetMillis = 0;
         this.lastClockSyncAt = 0;
         this.closing = new AtomicBoolean(false);
@@ -101,7 +106,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     protected void initializeImplementation() throws LeaderElectionException {
         // Allow reuse after close().
         closing.set(false);
-        lastClockSyncAt = 0; // force a fresh DB clock sync on (re-)initialization
+        lastClockSyncAt = 0;           // force a fresh DB clock sync on (re-)initialization
+        lastRenewalNanos = NANOS_NOT_SET; // reset nanoTime sentinel so step-down guards are fresh
+        backoffUntil = NANOS_NOT_SET;  // reset backoff on re-initialization
 
         LeaderElectionInformation info = getLeaderElectionInformation();
         if ((info.getNamespace() == null || info.getNamespace().isBlank()) && (info.getName() == null || info.getName().isBlank())) {
@@ -176,7 +183,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             return false;
         }
         long nanos = lastRenewalNanos;
-        if (nanos == 0L) {
+        if (nanos == NANOS_NOT_SET) {
             return true; // elected this tick, nanos not yet set
         }
         return System.nanoTime() - nanos
@@ -193,6 +200,13 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         if (!closing.compareAndSet(false, true)) {
             return;
         }
+
+        // Immediately invalidate the leader state so the LeaderLeaseMonitor (period 100 ms) can
+        // interrupt any running runIfLeader task WHILE we wait for the scheduler to drain below.
+        // Without this early signal, closeInternal() only sets isLeader=null after awaitTermination()
+        // has consumed the whole budget — leaving the task un-interruptible and the row deleted
+        // while the task is still running.
+        signalLeaderInvalid();
 
         // Compute a single deadline for the whole close() operation so the scheduler wait
         // and the task-cleanup wait together do not exceed closeTimeout.
@@ -340,7 +354,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * @return {@code true} if the caller should return immediately (leadership was relinquished)
      */
     private boolean checkPreTickRenewDeadline(String uniqueName, String instanceId) {
-        if (super.isLeader() && lastRenewalNanos > 0) {
+        if (super.isLeader() && lastRenewalNanos != NANOS_NOT_SET) {
             if (System.nanoTime() - lastRenewalNanos > getLeaderElectionConfiguration().getRenewDeadline().toNanos()) {
                 LOG.info("Renew deadline exceeded (pre-tick) for [{}], stepping down as leader.", uniqueName);
                 currentLeaderRecordId = null;
@@ -463,7 +477,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         // reason as checkPreTickRenewDeadline: the nanoTime check may already be false.
         // Uses nanoTime (same as the isLeader() override and checkPreTickRenewDeadline) so that
         // a wall-clock jump cannot trigger a spurious step-down.
-        if (super.isLeader() && lastRenewalNanos > 0
+        if (super.isLeader() && lastRenewalNanos != NANOS_NOT_SET
                 && System.nanoTime() - lastRenewalNanos > getLeaderElectionConfiguration().getRenewDeadline().toNanos()) {
             LOG.info("Renew deadline exceeded for [{}], stepping down as leader.", uniqueName);
             currentLeaderRecordId = null;
@@ -476,13 +490,15 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         }
 
         // Cap the backoff so it never pushes the next attempt past the renew deadline.
-        long retryPeriod = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
+        // Both candidate and cap use System.nanoTime() so a wall-clock jump backward
+        // (NTP correction, VM resume) cannot extend the backoff window unexpectedly.
+        long retryPeriodNanos = getLeaderElectionConfiguration().getRetryPeriod().toNanos();
         long exp = (long) Math.pow(2, Math.min(consecutiveFailures - 1, 5));
-        long backoffDelay = Math.min(retryPeriod * exp, MAX_BACKOFF_MILLIS);
-        long candidate = System.currentTimeMillis() + backoffDelay;
+        long backoffNanos = Math.min(retryPeriodNanos * exp, TimeUnit.MILLISECONDS.toNanos(MAX_BACKOFF_MILLIS));
+        long candidate = System.nanoTime() + backoffNanos;
         long renewDeadlineCap;
-        if (lastSuccessfulRenewalAt > 0) {
-            renewDeadlineCap = lastSuccessfulRenewalAt + renewDeadlineMillis;
+        if (lastRenewalNanos != NANOS_NOT_SET) {
+            renewDeadlineCap = lastRenewalNanos + getLeaderElectionConfiguration().getRenewDeadline().toNanos();
         } else {
             renewDeadlineCap = Long.MAX_VALUE;
         }
@@ -543,7 +559,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 return;
             }
             // Exponential back-off: skip this tick if we are still within the back-off window.
-            if (System.currentTimeMillis() < backoffUntil) {
+            // Uses nanoTime so a wall-clock step backwards does not extend the backoff.
+            if (backoffUntil != NANOS_NOT_SET && System.nanoTime() < backoffUntil) {
                 return;
             }
 
@@ -615,7 +632,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                     }
                 }
                 consecutiveFailures = 0;
-                backoffUntil = 0;
+                backoffUntil = NANOS_NOT_SET;
             } catch (Throwable e) {
                 handleTickError(e, uniqueName);
             }

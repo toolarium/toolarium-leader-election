@@ -163,6 +163,23 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
 
 
     /**
+     * Immediately mark the leader state as invalid without acquiring any locks or waiting.
+     * Called at the very start of a subclass {@code close()} so that the
+     * {@link LeaderLeaseMonitor} can interrupt running tasks <em>while</em> the subclass
+     * waits for its own resources to drain (e.g. a scheduler executor).
+     *
+     * <p>This is a targeted signal: it only sets the volatile fields that {@code isValid()}
+     * observes. All remaining cleanup (unregistration, monitor shutdown, latch reset) is
+     * still performed by {@link #closeInternal(long)}.
+     */
+    protected void signalLeaderInvalid() {
+        isLeader = null;
+        timestamp = null;
+        electionClosed = true;
+    }
+
+
+    /**
      * @see com.github.toolarium.leader.election.ILeaderElector#close()
      */
     @Override
@@ -181,7 +198,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * @param writeLockTimeoutMillis maximum milliseconds to wait for the lifecycle write lock
      * @throws LeaderElectionException if cleanup fails
      */
-    void closeInternal(long writeLockTimeoutMillis) throws LeaderElectionException {
+    protected void closeInternal(long writeLockTimeoutMillis) throws LeaderElectionException {
         boolean wasLeader = Boolean.TRUE.equals(isLeader);
 
         // Signal any running tasks: setting isLeader=null makes isValid() return false,

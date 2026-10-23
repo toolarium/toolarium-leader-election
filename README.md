@@ -327,6 +327,19 @@ leaderElector.elect();
 
 The library creates and manages the required `LeaderElection` table automatically. On startup it inspects the table schema and, if a v1.0.0 installation is detected (column named `timestamp`), renames it to `lease_ts` automatically. On new installations a secondary index on the `instance` column is also created; existing installations can add it manually with `CREATE INDEX idx_leaderelection_instance ON LeaderElection(instance)`.
 
+> **Externally managed schemas (Flyway, Liquibase, no DDL rights)**
+> If the database user has no DDL privileges, or the table is managed by a migration tool, set `allowDdl=false` on the configuration. The library will then fail fast with a descriptive error — including the exact DDL to apply — instead of attempting `CREATE TABLE` or `ALTER TABLE` at startup:
+>
+> ```java
+> config.setAllowDdl(false);  // disable runtime DDL; elect() throws if the table or column is missing
+> ```
+>
+> Expected columns: `id VARCHAR(36)`, `name VARCHAR(512)`, `instance VARCHAR(255)`, `username VARCHAR(255)`, `lease_ts BIGINT NOT NULL`, `force_release_deadline BIGINT NULL` (primary key on `name`).
+
+> **Connection pool requirement**
+> Each election tick borrows one connection from the `DataSource`. Ensure the pool is configured with a **connection-acquisition timeout** (e.g. HikariCP `connectionTimeout`, Agroal `acquisition-timeout`). An unbounded wait blocks the scheduler thread indefinitely, delaying step-down detection.
+> The minimum recommended `renewDeadline` is **3 seconds**: each tick issues up to 3 sequential statements, each with a 1-second minimum JDBC timeout; at shorter values the total per-tick latency can exceed the renew deadline.
+
 For databases with higher latency (e.g., Oracle), use the explicit `Duration` constructor to control `timeout`, `renewDeadline`, and `retryPeriod` independently:
 
 ```java
