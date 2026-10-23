@@ -599,7 +599,8 @@ public class DatabaseLeaderElectorFixesTest {
                         // expected: monitor interrupts via isValid()==false
                     }
                 });
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                // runIfLeader may throw LeaderElectionException when interrupted during close
             } finally {
                 taskFinished.countDown();
             }
@@ -747,8 +748,8 @@ public class DatabaseLeaderElectorFixesTest {
      * Verify that a stale {@code lastSuccessfulRenewalAt} wall-clock timestamp does NOT
      * cause the pre-tick guard to step the elector down.
      * After the Issue 3 fix the guard exclusively uses {@code lastRenewalNanos}
-     * ({@code System.nanoTime()}), so a wall-clock jump forward — simulated here by making
-     * {@code lastSuccessfulRenewalAt} appear very old — must have no effect.
+     * ({@code System.nanoTime()}), so a recent nanoTime value must keep the node as leader
+     * across multiple ticks regardless of any wall-clock state.
      *
      * @throws Exception in case of an error
      */
@@ -767,17 +768,17 @@ public class DatabaseLeaderElectorFixesTest {
                 LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("wall-clock-skew-group"), config);
         assertTrue(elector.elect());
 
-        // Simulate a wall-clock jump: set lastSuccessfulRenewalAt to 30 s in the past.
-        // The old (wall-clock) guard would have stepped the node down immediately.
-        Field wallField = elector.getClass().getDeclaredField("lastSuccessfulRenewalAt");
-        wallField.setAccessible(true);
-        wallField.setLong(elector, System.currentTimeMillis() - 30_000L);
+        // Reset lastRenewalNanos to now — simulates a fresh renewal so the renew-deadline
+        // guard must not fire. The (removed) wall-clock field lastSuccessfulRenewalAt no
+        // longer exists; the guard is now purely nanoTime-based.
+        Field nanosField = elector.getClass().getDeclaredField("lastRenewalNanos");
+        nanosField.setAccessible(true);
+        nanosField.setLong(elector, System.nanoTime());
 
-        // lastRenewalNanos is left untouched — the nanoTime-based guard must NOT fire.
         Thread.sleep(1500L); // wait past one retryPeriod so at least one tick runs
 
         assertTrue(elector.isLeader(),
-                "Elector must remain leader: wall-clock skew must not trigger the pre-tick step-down guard");
+                "Elector must remain leader: a recent lastRenewalNanos must not trigger the pre-tick step-down guard");
 
         elector.close();
     }
@@ -811,7 +812,10 @@ public class DatabaseLeaderElectorFixesTest {
 
         LeaderElectionException ex = assertThrows(LeaderElectionException.class, elector::elect,
                 "elect() must throw when table is missing and allowDdl=false");
-        String msg = ex.getMessage() + (ex.getCause() != null ? " " + ex.getCause().getMessage() : "");
+        String msg = ex.getMessage();
+        if (ex.getCause() != null) {
+            msg = msg + " " + ex.getCause().getMessage();
+        }
         assertTrue(msg.contains("allowDdl=false"),
                 "Error must mention 'allowDdl=false', was: " + msg);
     }
