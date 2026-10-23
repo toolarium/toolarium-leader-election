@@ -398,11 +398,13 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * Decides whether to keep, renew, or relinquish leadership based on the force-release
      * deadline and the nanoTime-based {@link #isLeader()} check.
      *
+     * @param mySession       session counter value captured when the handler was created
      * @param roundStartNanos nanoTime captured at the very start of the tick (before getDbNow)
      * @param dbNow           current DB-clock epoch milliseconds
      * @param uniqueName      the election group name
      * @param instanceId      this node's instance identifier
      * @param currentLeader   the current DB row for this election group (owned by this instance)
+     * @return {@code true} if the caller should return immediately (stale session or closing)
      * @throws Exception on DB access errors
      */
     private boolean handleOwnLeaderTick(int mySession, long roundStartNanos, long dbNow, String uniqueName, String instanceId, LeaderElectorRecord currentLeader) throws Exception {
@@ -431,16 +433,20 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                     }
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                     int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
-                    // Mid-round session check: discard result if close()+elect() cycled while blocked.
-                    if (mySession != sessionCounter || closing.get()) {
-                        return true;
-                    }
-                    if (result > 0) {
-                        currentLeaderRecordId = newRecord.getId();
-                        lastRenewalNanos = roundStartNanos;
-                        setLeader(true, null);
-                    } else {
-                        currentLeaderRecordId = null;
+                    // Mid-round session check and state update run under the same intrinsic lock as
+                    // signalLeaderInvalid() so that close()+elect() cannot interleave between the check
+                    // and the setLeader(true)/field writes (Issue 3 fix).
+                    synchronized (this) {
+                        if (mySession != sessionCounter || closing.get()) {
+                            return true;
+                        }
+                        if (result > 0) {
+                            currentLeaderRecordId = newRecord.getId();
+                            lastRenewalNanos = roundStartNanos;
+                            setLeader(true, null);
+                        } else {
+                            currentLeaderRecordId = null;
+                        }
                     }
                 } else {
                     // Lease still within timeout window — keep the row as a guard until it ages
@@ -462,17 +468,21 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             // forceRelease that set the deadline between our SELECT and UPDATE cannot be bypassed.
             LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
             int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
-            // Mid-round session check: discard result if close()+elect() cycled while blocked.
-            if (mySession != sessionCounter || closing.get()) {
-                return true;
-            }
-            if (result > 0) {
-                currentLeaderRecordId = newRecord.getId();
-                lastRenewalNanos = roundStartNanos;
-                setLeader(true, null);
-            } else {
-                currentLeaderRecordId = null;
-                setLeader(false, null);
+            // Mid-round session check and state update run under the same intrinsic lock as
+            // signalLeaderInvalid() so that close()+elect() cannot interleave between the check
+            // and the setLeader(true)/field writes (Issue 3 fix).
+            synchronized (this) {
+                if (mySession != sessionCounter || closing.get()) {
+                    return true;
+                }
+                if (result > 0) {
+                    currentLeaderRecordId = newRecord.getId();
+                    lastRenewalNanos = roundStartNanos;
+                    setLeader(true, null);
+                } else {
+                    currentLeaderRecordId = null;
+                    setLeader(false, null);
+                }
             }
         }
         return false;
@@ -647,15 +657,20 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                     if (result > 0) {
                         rowWrittenThisRound = true;
                     }
-                    if (mySession != sessionCounter || closing.get()) {
-                        return;
-                    }
-                    if (result > 0) {
-                        currentLeaderRecordId = newRecord.getId();
-                        lastRenewalNanos = roundStartNanos;
-                        setLeader(true, null);
-                    } else {
-                        setLeader(false, null);
+                    // Session check and state update are atomic under the same intrinsic lock as
+                    // signalLeaderInvalid() so that close()+elect() cannot interleave between the
+                    // check and the setLeader(true)/field writes (Issue 3 fix).
+                    synchronized (DatabaseLeaderElectorImpl.this) {
+                        if (mySession != sessionCounter || closing.get()) {
+                            return;
+                        }
+                        if (result > 0) {
+                            currentLeaderRecordId = newRecord.getId();
+                            lastRenewalNanos = roundStartNanos;
+                            setLeader(true, null);
+                        } else {
+                            setLeader(false, null);
+                        }
                     }
                 } else if (instanceId.equals(currentLeader.getInstance())) {
                     if (handleOwnLeaderTick(mySession, roundStartNanos, dbNow, uniqueName, instanceId, currentLeader)) {
@@ -681,15 +696,20 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         if (result > 0) {
                             rowWrittenThisRound = true;
                         }
-                        if (mySession != sessionCounter || closing.get()) {
-                            return;
-                        }
-                        if (result > 0) {
-                            currentLeaderRecordId = newRecord.getId();
-                            lastRenewalNanos = System.nanoTime();
-                            setLeader(true, null);
-                        } else {
-                            setLeader(false, null);
+                        // Session check and state update are atomic under the same intrinsic lock as
+                        // signalLeaderInvalid() so that close()+elect() cannot interleave between the
+                        // check and the setLeader(true)/field writes (Issue 3 fix).
+                        synchronized (DatabaseLeaderElectorImpl.this) {
+                            if (mySession != sessionCounter || closing.get()) {
+                                return;
+                            }
+                            if (result > 0) {
+                                currentLeaderRecordId = newRecord.getId();
+                                lastRenewalNanos = roundStartNanos;
+                                setLeader(true, null);
+                            } else {
+                                setLeader(false, null);
+                            }
                         }
                     } else {
                         setLeader(false, null);
@@ -700,12 +720,13 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             } catch (Throwable e) {
                 handleTickError(e, uniqueName);
             } finally {
-                // If close() is in progress AND this round wrote a new row (insert or steal from
-                // another instance), delete it so other nodes are not delayed by the full timeout.
+                // If close() is in progress OR this round belongs to a stale session (close()+elect()
+                // cycled while blocked in a DB call), AND this round wrote a new row (insert or steal
+                // from another instance), delete it so other nodes are not delayed by the full timeout.
                 // Renewal rows (updateLeaderTimestamp) are excluded: they existed before close()
                 // ran and are removed by close() itself only after closeInternal() has waited for
                 // all running runIfLeader tasks to finish, preventing the split-brain overlap.
-                if (closing.get() && rowWrittenThisRound) {
+                if ((closing.get() || mySession != sessionCounter) && rowWrittenThisRound) {
                     try {
                         leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
                     } catch (Exception ex) {
