@@ -80,17 +80,17 @@ public class DatabaseLeaderElectorBackoffTest {
         Field backoffUntilField = elector.getClass().getDeclaredField("backoffUntil");
         backoffUntilField.setAccessible(true);
         long backoffUntil = (long) backoffUntilField.get(elector);
-        // backoffUntil > 0 confirms the back-off mechanism activated at least once.
-        // Checking > now would be a timing race; > 0 is stable.
-        assertTrue(backoffUntil > 0,
-                "Back-off must have been set (backoffUntil > 0), was: " + backoffUntil);
+        // backoffUntil != Long.MIN_VALUE (NANOS_NOT_SET) confirms the back-off mechanism activated.
+        // Checking > now would be a timing race; != sentinel is stable and platform-safe.
+        assertTrue(backoffUntil != Long.MIN_VALUE,
+                "Back-off must have been set (backoffUntil != NANOS_NOT_SET), was: " + backoffUntil);
 
         elector.close();
     }
 
 
     /**
-     * Verify that after DB is restored the back-off counter and window reset to zero on the
+     * Verify that after DB is restored the back-off counter and window reset to NANOS_NOT_SET on the
      * first successful scheduler tick.
      *
      * @throws Exception In case of an error
@@ -120,8 +120,8 @@ public class DatabaseLeaderElectorBackoffTest {
         Field backoffUntilField = elector.getClass().getDeclaredField("backoffUntil");
         backoffUntilField.setAccessible(true);
         long backoffUntil = (long) backoffUntilField.get(elector);
-        // Confirm back-off was activated (> 0); checking > now is a timing race so we avoid it.
-        assertTrue(backoffUntil > 0, "Back-off must have been set (backoffUntil > 0), was: " + backoffUntil);
+        // Confirm back-off was activated (!= NANOS_NOT_SET); checking > now is a timing race.
+        assertTrue(backoffUntil != Long.MIN_VALUE, "Back-off must have been set (backoffUntil != NANOS_NOT_SET), was: " + backoffUntil);
 
         // Restore DB; wait generously for backoff to expire + at least one successful tick.
         // Max backoff after 3 failures = retryPeriod * 2^2 = 300 * 4 = 1200ms.
@@ -135,7 +135,7 @@ public class DatabaseLeaderElectorBackoffTest {
         assertEquals(0, consecutiveFailures, "consecutiveFailures must reset to 0 after a successful tick");
 
         long backoffUntilAfter = (long) backoffUntilField.get(elector);
-        assertEquals(0L, backoffUntilAfter, "backoffUntil must reset to 0 after a successful tick");
+        assertEquals(Long.MIN_VALUE, backoffUntilAfter, "backoffUntil must reset to NANOS_NOT_SET after a successful tick");
 
         elector.close();
     }

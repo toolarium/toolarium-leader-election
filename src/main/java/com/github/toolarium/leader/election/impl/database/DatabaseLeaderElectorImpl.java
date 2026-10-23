@@ -36,8 +36,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>Clock synchronisation:</b> all {@code lease_ts} writes use the database server clock
  * ({@code SELECT CURRENT_TIMESTAMP}) so expiry decisions are consistent across nodes regardless
- * of local clock skew.  The internal renew-deadline guard ({@code lastSuccessfulRenewalAt})
- * still uses the local clock for scheduling purposes only and is not persisted to the database.
+ * of local clock skew.  The monotonic renew-deadline guard ({@code lastRenewalNanos}) uses
+ * {@code System.nanoTime()} for scheduling purposes only and is not persisted to the database.
  *
  * <p><b>Lifecycle and DataSource:</b> {@link #close()} deletes the leader row so another node
  * can take over immediately.  In frameworks where the DataSource is a managed resource
@@ -69,7 +69,6 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private volatile String currentLeaderRecordId;
     private volatile int consecutiveFailures;
     private volatile long backoffUntil;
-    private volatile long lastSuccessfulRenewalAt;
     private volatile long lastRenewalNanos;
     private volatile long dbClockOffsetMillis;
     private volatile long lastClockSyncAt;
@@ -91,7 +90,6 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         this.currentLeaderRecordId = null;
         this.consecutiveFailures = 0;
         this.backoffUntil = NANOS_NOT_SET;
-        this.lastSuccessfulRenewalAt = 0;
         this.lastRenewalNanos = NANOS_NOT_SET;
         this.dbClockOffsetMillis = 0;
         this.lastClockSyncAt = 0;
@@ -156,7 +154,6 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
             if (result > 0) {
                 currentLeaderRecordId = newRecord.getId();
-                lastSuccessfulRenewalAt = System.currentTimeMillis();
                 lastRenewalNanos = extendStartNanos;
                 setLeader(true, null);
                 return true;
@@ -201,6 +198,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             return;
         }
 
+        // Capture wasLeader before signalLeaderInvalid() nulls the field so that
+        // closeInternal() can still log "Released lead" correctly.
+        boolean wasLeader = super.isLeader();
+
         // Immediately invalidate the leader state so the LeaderLeaseMonitor (period 100 ms) can
         // interrupt any running runIfLeader task WHILE we wait for the scheduler to drain below.
         // Without this early signal, closeInternal() only sets isLeader=null after awaitTermination()
@@ -241,7 +242,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         // while our task still holds the lease as valid.
         long remainingForSuper = TimeUnit.NANOSECONDS.toMillis(closeDeadlineNanos - System.nanoTime());
         try {
-            super.closeInternal(Math.max(0L, remainingForSuper));
+            super.closeInternal(wasLeader, Math.max(0L, remainingForSuper));
         } finally {
             // Delete own leader record so another node can take over immediately.
             if (currentLeaderRecordId != null) {
@@ -403,9 +404,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 if ((leaseExpired || forceReleaseReady) && !closing.get()) {
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                     int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
-                    if (result > 0) {
+                    if (result > 0 && !closing.get()) {
                         currentLeaderRecordId = newRecord.getId();
-                        lastSuccessfulRenewalAt = System.currentTimeMillis();
                         lastRenewalNanos = roundStartNanos;
                         setLeader(true, null);
                     } else {
@@ -431,14 +431,15 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             // forceRelease that set the deadline between our SELECT and UPDATE cannot be bypassed.
             LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
             int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
-            if (result > 0) {
+            if (result > 0 && !closing.get()) {
                 currentLeaderRecordId = newRecord.getId();
-                lastSuccessfulRenewalAt = System.currentTimeMillis();
                 lastRenewalNanos = roundStartNanos;
                 setLeader(true, null);
             } else {
                 currentLeaderRecordId = null;
-                setLeader(false, null);
+                if (result <= 0) {
+                    setLeader(false, null);
+                }
             }
         }
     }
@@ -592,9 +593,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                     }
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                     int result = leaderElectionDAO.insertLeader(newRecord);
-                    if (result > 0) {
+                    if (result > 0 && !closing.get()) {
                         currentLeaderRecordId = newRecord.getId();
-                        lastSuccessfulRenewalAt = System.currentTimeMillis();
                         lastRenewalNanos = roundStartNanos;
                         setLeader(true, null);
                     } else {
@@ -619,9 +619,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         }
                         LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                         int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
-                        if (result > 0) {
+                        if (result > 0 && !closing.get()) {
                             currentLeaderRecordId = newRecord.getId();
-                            lastSuccessfulRenewalAt = System.currentTimeMillis();
                             lastRenewalNanos = System.nanoTime();
                             setLeader(true, null);
                         } else {

@@ -199,8 +199,21 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * @throws LeaderElectionException if cleanup fails
      */
     protected void closeInternal(long writeLockTimeoutMillis) throws LeaderElectionException {
-        boolean wasLeader = Boolean.TRUE.equals(isLeader);
+        closeInternal(Boolean.TRUE.equals(isLeader), writeLockTimeoutMillis);
+    }
 
+
+    /**
+     * Shared close logic with an explicit {@code wasLeader} flag. Callers that invalidate
+     * the leader state early (via {@link #signalLeaderInvalid()}) before calling this method
+     * must capture {@code wasLeader} beforehand and pass it here so that the
+     * "Released lead" log is emitted correctly.
+     *
+     * @param wasLeader              {@code true} if this node held leadership before close
+     * @param writeLockTimeoutMillis maximum milliseconds to wait for the lifecycle write lock
+     * @throws LeaderElectionException if cleanup fails
+     */
+    protected void closeInternal(boolean wasLeader, long writeLockTimeoutMillis) throws LeaderElectionException {
         // Signal any running tasks: setting isLeader=null makes isValid() return false,
         // so the LeaderLeaseMonitor will interrupt them on its next check (within 100 ms).
         isLeader = null;

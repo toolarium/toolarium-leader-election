@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DATABASE**: `runIfLeader` tasks are interrupted reliably when leadership is lost, with no spurious interrupt leaks to the calling thread.
 - **ALL**: `ILeaderLease.isValid()` correctly returns `false` for leases from a previous leadership term after a lose-and-regain cycle.
 - **DATABASE**: `close()` now correctly interrupts running `runIfLeader` tasks even when the close budget is nearly exhausted.
+- **DATABASE**: a scheduler tick already in flight when `close()` is called can no longer re-establish leadership after `close()` has invalidated it.
 
 ## [ 1.2.1 ] - 2026-10-22
 ### Added
