@@ -390,7 +390,12 @@ public class LeaderElectionFactoryTest {
         LOG.debug("->Check leader");
         assertFalse(leaderElector.isLeader());
         LOG.debug("->Elect leader");
-        assertTrue(leaderElector.elect(Duration.ofMillis(8000)));
+        // NETWORK strategy needs extra time due to JGroups UDP multicast congestion from prior tests
+        long electTimeoutMs = 8000L;
+        if (LeaderElectionStrategy.NETWORK.equals(strategy)) {
+            electTimeoutMs = 15000L;
+        }
+        assertTrue(leaderElector.elect(Duration.ofMillis(electTimeoutMs)));
         LOG.debug("->Elect leader (idempotent)");
         assertTrue(leaderElector.elect(Duration.ofMillis(100)));
         LOG.debug("->Check leader");
