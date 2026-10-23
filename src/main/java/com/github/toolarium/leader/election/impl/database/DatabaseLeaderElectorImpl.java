@@ -57,6 +57,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private static final long MAX_BACKOFF_MILLIS = 60_000L;
     // Refresh the DB clock offset every CLOCK_SYNC_TICKS ticks; between syncs use System.currentTimeMillis() + dbClockOffsetMillis to avoid an extra DB round-trip per tick.
     private static final int CLOCK_SYNC_TICKS = 5;
+    // Safety cap on getDatabaseElectorViews(): prevents heap pressure when the table
+    // has leaked rows (e.g. crashed nodes that never deleted their row).
+    private static final int MAX_ELECTOR_ROWS = 1000;
     // Sentinel for lastRenewalNanos and backoffUntil meaning "not yet set".
     // Long.MIN_VALUE is used rather than 0 because System.nanoTime() has an arbitrary origin
     // and may legally return negative values; using 0 as "not set" silently disables the
@@ -84,6 +87,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     // electors whose elect() was never called (or whose init failed, e.g. allowDdl=false with a
     // missing table) do not emit a noisy INFO log when close() finds no table to delete from.
     private volatile boolean daoReady;
+    // Dedicated lock for dbClockOffsetMillis / lastClockSyncAt so that getDbNow()
+    // (which may execute a DB round-trip) does not block threads waiting for
+    // synchronized(this), e.g. close() calling signalLeaderInvalid().
+    private final Object clockSyncLock = new Object();
 
     // -----------------------------------------------------------------------
     // Lock acquisition order — MUST be respected to prevent deadlock:
@@ -91,8 +98,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     //   2. synchronized(this) — intrinsic lock used by setLeader(),
     //      signalLeaderInvalid(), extendLeaseNow(), and the session-check
     //      blocks in DatabaseElectionHandler / handleOwnLeaderTick()
-    // Code that already holds synchronized(this) MUST NOT attempt to
-    // acquire lifecycleLock in any form.
+    //   3. clockSyncLock — guards dbClockOffsetMillis / lastClockSyncAt only;
+    //      MUST NOT be acquired while holding synchronized(this) or lifecycleLock
     // -----------------------------------------------------------------------
 
 
@@ -265,12 +272,13 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             scheduledFuture = null;
         }
 
-        if (scheduledExecuterService != null) {
+        ScheduledExecutorService ses = scheduledExecuterService;
+        if (ses != null) {
             try {
-                scheduledExecuterService.shutdown();
+                ses.shutdown();
                 long remainingMs = TimeUnit.NANOSECONDS.toMillis(closeDeadlineNanos - System.nanoTime());
                 if (remainingMs > 0) {
-                    scheduledExecuterService.awaitTermination(remainingMs, TimeUnit.MILLISECONDS);
+                    ses.awaitTermination(remainingMs, TimeUnit.MILLISECONDS);
                 }
             } catch (InterruptedException e) {
                 // Restore the interrupt flag so the calling thread (e.g. a framework shutdown
@@ -350,16 +358,29 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * by other nodes in the cluster. Local leaders (this JVM) are included as well; the caller
      * (LeaderElectionScheduler) deduplicates by id.
      *
+     * <p><b>Data exposure:</b> each view reflects raw database column values, including the OS
+     * username stored in the {@code username} column by each cluster node. Callers that log or
+     * display view fields should be aware that this data originates from the database and may
+     * include information contributed by other nodes.
+     *
+     * <p>Results are capped at {@value #MAX_ELECTOR_ROWS} rows; a WARN is logged if the table
+     * exceeds that limit.
+     *
      * @return unmodifiable collection of views; never {@code null}
      */
     public Collection<ILeaderElectorView> getDatabaseElectorViews() {
         try {
             List<LeaderElectorRecord> records = leaderElectionDAO.selectAll();
-            List<ILeaderElectorView> views = new ArrayList<>();
+            if (records.size() > MAX_ELECTOR_ROWS) {
+                LOG.warn("getDatabaseElectorViews(): result truncated to {} rows (table contains {}). "
+                        + "Check for leaked rows in the leader-election table.", MAX_ELECTOR_ROWS, records.size());
+                records = records.subList(0, MAX_ELECTOR_ROWS);
+            }
+            List<ILeaderElectorView> views = new ArrayList<>(records.size());
             for (LeaderElectorRecord record : records) {
                 views.add(new DatabaseRecordView(record));
             }
-            return Collections.unmodifiableList(views);
+            return List.copyOf(views);
         } catch (Exception e) {
             LOG.warn("Could not query stored leader records: {}", e.getMessage());
             return Collections.emptyList();
@@ -382,6 +403,11 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * {@code retryPeriod} after the deadline is written). A new leader can only acquire after
      * the deadline elapses (= {@code renewDeadline} from now). Since {@code renewDeadline >= retryPeriod},
      * the new leader acquires only after the old holder has already stepped down — no split-brain.
+     *
+     * <p><b>Access control:</b> this method is privileged — it can disrupt leadership for any
+     * remote node in the cluster. The framework provides no built-in authorisation check; the
+     * caller is responsible for ensuring that only authorised principals (e.g. administrators)
+     * can invoke it.
      *
      * @param instanceId the stable instance id ({@link ILeaderElectorView#getId()}) of the remote leader
      * @return {@code true} if a matching record was found and the deadline was set
@@ -475,7 +501,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             // We hold the DB row but have already stepped down locally (renewDeadline exceeded or
             // force-release processed on a previous tick). Ensure the stored flag is false so the
             // term is incremented on the next acquisition.
-            setLeader(false, null);
+            synchronized (this) {
+                setLeader(false, null);
+            }
             if (frd != 0 && frd > dbNow) {
                 // Force-release deadline still in the future — keep the row as a guard so no
                 // other node can acquire before the deadline elapses. Nothing to do this tick.
@@ -569,6 +597,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private void handleTickError(Throwable e, String uniqueName) {
         consecutiveFailures++;
         if (e instanceof Error) {
+            // Log at ERROR so operators notice the JVM-level problem.  The scheduler is kept
+            // alive: re-throwing would cancel all future executions of scheduleAtFixedRate.
             LOG.error("Fatal error in election tick for [{}]: {}", uniqueName, e.getMessage());
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Error detail:", e);
@@ -594,8 +624,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         if (super.isLeader() && lastRenewalNanos != NANOS_NOT_SET
                 && System.nanoTime() - lastRenewalNanos > getLeaderElectionConfiguration().getRenewDeadline().toNanos()) {
             LOG.info("Renew deadline exceeded for [{}], stepping down as leader.", uniqueName);
-            currentLeaderRecordId = null;
-            setLeader(false, null);
+            synchronized (this) {
+                currentLeaderRecordId = null;
+                setLeader(false, null);
+            }
         }
 
         // Ensure elect() can return even when the very first round fails with a DB error.
@@ -638,7 +670,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      *
      * @return epoch milliseconds anchored to the DB server clock (best-effort)
      */
-    private synchronized long getDbNow() {
+    private long getDbNow() {
         long retryMillis = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
         long now = System.currentTimeMillis();
         // Saturating multiply: guard against overflow for extreme retryPeriod values.
@@ -654,36 +686,54 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         } else {
             stalenessThresholdMs = Long.MAX_VALUE;
         }
-        if (lastClockSyncAt == 0 || now - lastClockSyncAt > refreshThresholdMs) {
+
+        // Read the sync timestamp under the lock, then perform the DB call outside it so
+        // that a blocked DB round-trip never prevents close()/signalLeaderInvalid() from
+        // acquiring synchronized(this).
+        boolean needsRefresh;
+        synchronized (clockSyncLock) {
+            needsRefresh = lastClockSyncAt == 0 || now - lastClockSyncAt > refreshThresholdMs;
+        }
+        if (needsRefresh) {
             try {
                 long dbNow = leaderElectionDAO.getDatabaseCurrentTimeMillis();
-                dbClockOffsetMillis = dbNow - now;
-                lastClockSyncAt = now;
+                // Write fields back under the lock; use the pre-call `now` so that
+                // lastClockSyncAt reflects when the refresh was initiated (prevents
+                // concurrent callers from both issuing the DB call).
+                synchronized (clockSyncLock) {
+                    dbClockOffsetMillis = dbNow - now;
+                    lastClockSyncAt = now;
+                }
                 return dbNow;
             } catch (Exception e) {
-                if (lastClockSyncAt > 0) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug("Could not refresh DB clock offset for [{}], using stale offset: {}",
+                synchronized (clockSyncLock) {
+                    if (lastClockSyncAt > 0) {
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("Could not refresh DB clock offset for [{}], using stale offset: {}",
+                                    getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
+                        }
+                    } else {
+                        LOG.info("Could not fetch initial DB clock for [{}], using local clock: {}",
                                 getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
                     }
-                } else {
-                    LOG.info("Could not fetch initial DB clock for [{}], using local clock: {}",
-                            getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
                 }
             }
         }
-        // Staleness bound: if the offset has not been refreshed within twice the normal refresh
-        // window, reset it to zero (fall back to pure local clock). A stale offset that has
-        // drifted during a prolonged DB outage would skew all lease timestamps on recovery.
-        // Lease writes during the outage fail at the DB call regardless, so local time is safe.
-        if (lastClockSyncAt > 0 && now - lastClockSyncAt > stalenessThresholdMs) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("DB clock offset for [{}] is stale ({}ms old), resetting to zero (local clock).",
-                        getLeaderElectionInformation().getElectionGroupName(), now - lastClockSyncAt);
+
+        synchronized (clockSyncLock) {
+            // Staleness bound: if the offset has not been refreshed within twice the normal refresh
+            // window, reset it to zero (fall back to pure local clock). A stale offset that has
+            // drifted during a prolonged DB outage would skew all lease timestamps on recovery.
+            // Lease writes during the outage fail at the DB call regardless, so local time is safe.
+            if (lastClockSyncAt > 0 && now - lastClockSyncAt > stalenessThresholdMs) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("DB clock offset for [{}] is stale ({}ms old), resetting to zero (local clock).",
+                            getLeaderElectionInformation().getElectionGroupName(), now - lastClockSyncAt);
+                }
+                dbClockOffsetMillis = 0;
             }
-            dbClockOffsetMillis = 0;
+            return now + dbClockOffsetMillis;
         }
-        return now + dbClockOffsetMillis;
     }
 
 
@@ -810,19 +860,21 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                             }
                         }
                     } else {
-                        setLeader(false, null);
+                        synchronized (DatabaseLeaderElectorImpl.this) {
+                            setLeader(false, null);
+                        }
                     }
                 }
                 consecutiveFailures = 0;
                 backoffUntil = NANOS_NOT_SET;
             } catch (Throwable e) {
+                // handleTickError() logs, steps down if renewDeadline is exceeded, and schedules
+                // backoff.  We intentionally do NOT re-throw Errors: with scheduleAtFixedRate a
+                // thrown exception cancels ALL future executions, so re-throwing a transient Error
+                // (e.g. OOM during a load peak, StackOverflowError in a JDBC driver) would
+                // permanently stop this elector without any further recovery attempt.  The ERROR
+                // log from handleTickError() is the operator's signal to investigate.
                 handleTickError(e, uniqueName);
-                // Errors (OutOfMemoryError, StackOverflowError, …) indicate a JVM-level problem.
-                // Re-throw so the scheduler does not keep firing ticks in a broken state.
-                // handleTickError() has already logged and, if applicable, stepped down as leader.
-                if (e instanceof Error) {
-                    throw (Error) e;
-                }
             } finally {
                 // If close() is in progress OR this round belongs to a stale session (close()+elect()
                 // cycled while blocked in a DB call), AND this round wrote a new row (insert or steal
@@ -851,6 +903,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      */
     private final class DatabaseRecordView implements ILeaderElectorView {
         private final LeaderElectorRecord record;
+        // Cached at construction so repeated calls to getLeaderElectionInformation() do not
+        // allocate a new LeaderElectionInformation object each time (e.g. in admin monitor loops).
+        private final LeaderElectionInformation cachedInfo;
 
 
         /**
@@ -860,6 +915,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
          */
         DatabaseRecordView(LeaderElectorRecord record) {
             this.record = record;
+            LeaderElectionInformation base = DatabaseLeaderElectorImpl.this.getLeaderElectionInformation();
+            this.cachedInfo = new LeaderElectionInformation(base.getNamespace(), base.getName(), record.getInstance());
         }
 
 
@@ -879,8 +936,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
          */
         @Override
         public ILeaderElectionInformation getLeaderElectionInformation() {
-            LeaderElectionInformation base = DatabaseLeaderElectorImpl.this.getLeaderElectionInformation();
-            return new LeaderElectionInformation(base.getNamespace(), base.getName(), record.getInstance());
+            return cachedInfo;
         }
 
 
