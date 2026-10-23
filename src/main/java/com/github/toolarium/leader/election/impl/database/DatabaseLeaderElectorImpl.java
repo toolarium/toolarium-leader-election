@@ -21,12 +21,14 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,7 +69,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private volatile ScheduledFuture<?> scheduledFuture;
     private LeaderElectionDAO leaderElectionDAO;
     private volatile String currentLeaderRecordId;
-    private volatile int consecutiveFailures;
+    private int consecutiveFailures;  // only accessed by the scheduler thread (reset in initializeImplementation() before scheduler starts)
     private volatile long backoffUntil;
     private volatile long lastRenewalNanos;
     private volatile long dbClockOffsetMillis;
@@ -77,11 +79,22 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     // Monotonically increasing session counter. Incremented by close() so that a
     // DatabaseElectionHandler from the previous session (still blocked in a DB call) can
     // detect the session change and discard its result without touching the new session's state.
-    private volatile int sessionCounter;
+    // AtomicInteger makes the increment in close() atomic without relying on the closing CAS.
+    private final AtomicInteger sessionCounter;
     // Set to true once leaderElectionDAO.init() succeeds; guards the DELETE in close() so that
     // electors whose elect() was never called (or whose init failed, e.g. allowDdl=false with a
     // missing table) do not emit a noisy INFO log when close() finds no table to delete from.
     private volatile boolean daoReady;
+
+    // -----------------------------------------------------------------------
+    // Lock acquisition order — MUST be respected to prevent deadlock:
+    //   1. lifecycleLock (writeLock or readLock) — AbstractLeaderElectorImpl
+    //   2. synchronized(this) — intrinsic lock used by setLeader(),
+    //      signalLeaderInvalid(), extendLeaseNow(), and the session-check
+    //      blocks in DatabaseElectionHandler / handleOwnLeaderTick()
+    // Code that already holds synchronized(this) MUST NOT attempt to
+    // acquire lifecycleLock in any form.
+    // -----------------------------------------------------------------------
 
 
     /**
@@ -102,7 +115,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         this.dbClockOffsetMillis = 0;
         this.lastClockSyncAt = 0;
         this.closing = new AtomicBoolean(false);
-        this.sessionCounter = 0;
+        this.sessionCounter = new AtomicInteger(0);
         this.daoReady = false;
     }
 
@@ -118,6 +131,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         lastClockSyncAt = 0;           // force a fresh DB clock sync on (re-)initialization
         lastRenewalNanos = NANOS_NOT_SET; // reset nanoTime sentinel so step-down guards are fresh
         backoffUntil = NANOS_NOT_SET;  // reset backoff on re-initialization
+        consecutiveFailures = 0;       // reset failure count so log level and backoff start fresh
 
         LeaderElectionInformation info = getLeaderElectionInformation();
         if ((info.getNamespace() == null || info.getNamespace().isBlank()) && (info.getName() == null || info.getName().isBlank())) {
@@ -131,11 +145,6 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             throw new LeaderElectionException("Could not prepare database for leader election: " + e.getMessage(), e);
         }
 
-        // Run the first election round synchronously so isLeader() reflects a real result
-        // immediately after initialize() returns. A DB error in this initial round is absorbed
-        // (same behaviour as a failed scheduled tick) and the periodic task will retry.
-        new DatabaseElectionHandler().run();
-
         String electionGroupName = getLeaderElectionInformation().getElectionGroupName();
         ThreadFactory daemonFactory = runnable -> {
             Thread t = new Thread(runnable, "leader-election-db-" + electionGroupName);
@@ -144,8 +153,13 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         };
         scheduledExecuterService = Executors.newScheduledThreadPool(1, daemonFactory);
         long retryMillis = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
+        // initialDelay=0: the first tick fires in the scheduler's daemon thread immediately
+        // after the writeLock from startElectionIfNeeded() is released, so runIfLeader()
+        // callers are not blocked for a DB round-trip at startup.
+        // elect() blocks on electionLatch.await() until the first tick calls setLeader(),
+        // which counts down the latch — the result is visible as soon as the DB responds.
         scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(
-                new DatabaseElectionHandler(), retryMillis, retryMillis, TimeUnit.MILLISECONDS);
+                new DatabaseElectionHandler(), 0, retryMillis, TimeUnit.MILLISECONDS);
     }
 
 
@@ -164,15 +178,21 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             long dbNow = getDbNow();
             LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
             int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
-            if (result > 0) {
-                currentLeaderRecordId = newRecord.getId();
-                lastRenewalNanos = extendStartNanos;
-                setLeader(true, null);
-                return true;
-            } else {
-                currentLeaderRecordId = null;
-                setLeader(false, null);
-                return false;
+            // Synchronize on the same intrinsic lock as setLeader/signalLeaderInvalid so that
+            // a concurrent close() cannot interleave between the field writes and setLeader(true).
+            // Re-read via super.isLeader() on the true-branch in case electionClosed caused
+            // setLeader(true) to be refused — in that case return false, not true.
+            synchronized (this) {
+                if (result > 0) {
+                    currentLeaderRecordId = newRecord.getId();
+                    lastRenewalNanos = extendStartNanos;
+                    setLeader(true, null);
+                    return super.isLeader();
+                } else {
+                    currentLeaderRecordId = null;
+                    setLeader(false, null);
+                    return false;
+                }
             }
         } catch (Exception e) {
             throw new LeaderElectionException("Could not extend leader lease: " + e.getMessage(), e);
@@ -213,7 +233,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         // Invalidate all DatabaseElectionHandler instances from this session so that any
         // round still blocked in a DB call after awaitTermination() returns will discard its
         // result and not write state to a future session started by elect() after this close().
-        sessionCounter++;
+        sessionCounter.incrementAndGet();
 
         // Capture wasLeader before signalLeaderInvalid() nulls the field so that
         // closeInternal() can still log "Released lead" correctly.
@@ -232,9 +252,14 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         long closeDeadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeMillis);
 
         // Cancel the scheduler so no new ticks start.
-        if (scheduledFuture != null) {
+        // Capture into a local to avoid a TOCTOU race on the volatile field between the
+        // null-check and the cancel() call (initializeImplementation() could theoretically
+        // write a new value if elect() were called concurrently, though close() is already
+        // guarded by the closing CAS so this is belt-and-suspenders).
+        ScheduledFuture<?> sf = scheduledFuture;
+        if (sf != null) {
             try {
-                scheduledFuture.cancel(false);
+                sf.cancel(false);
             } catch (Exception e) {
                 // NOP
             }
@@ -248,6 +273,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 if (remainingMs > 0) {
                     scheduledExecuterService.awaitTermination(remainingMs, TimeUnit.MILLISECONDS);
                 }
+            } catch (InterruptedException e) {
+                // Restore the interrupt flag so the calling thread (e.g. a framework shutdown
+                // thread) can observe that it was interrupted and react accordingly.
+                Thread.currentThread().interrupt();
             } catch (Exception e) {
                 // NOP
             }
@@ -269,19 +298,47 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             // table even though this elector is no longer active.
             // Guard on daoReady: if elect() was never called or init() failed (e.g. allowDdl=false
             // with a missing table), skip the DELETE silently — there is no row to delete.
+            //
+            // The DELETE runs on a daemon thread joined for at most the remaining closeTimeout
+            // budget.  A hanging database cannot cause close() to block beyond closeTimeout;
+            // if the DELETE does not finish in time the row expires naturally after `timeout`.
             if (daoReady) {
-                try {
-                    leaderElectionDAO.deleteLeaderByNameAndInstance(getLeaderElectionInformation().getElectionGroupName(), getId());
-                } catch (Exception e) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug("Error detail:", e);
+                final String groupName = getLeaderElectionInformation().getElectionGroupName();
+                final String instanceId = getId();
+                Thread deleteThread = new Thread(() -> {
+                    try {
+                        leaderElectionDAO.deleteLeaderByNameAndInstance(groupName, instanceId);
+                    } catch (Exception e) {
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("Error detail:", e);
+                        }
+                        LOG.info("Could not delete leader record on close for [{}]: {}, the row will expire after the configured timeout. "
+                                + "To avoid this delay call close() before the DataSource is destroyed (e.g. @PreDestroy).",
+                                groupName, e.getMessage());
                     }
-                    LOG.info("Could not delete leader record on close for [{}]: {}, the row will expire after the configured timeout. "
+                }, "leader-election-db-close-" + getLeaderElectionInformation().getName());
+                deleteThread.setDaemon(true);
+                deleteThread.start();
+                long remainingForDelete = TimeUnit.NANOSECONDS.toMillis(closeDeadlineNanos - System.nanoTime());
+                if (remainingForDelete > 0) {
+                    try {
+                        deleteThread.join(remainingForDelete);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                if (deleteThread.isAlive()) {
+                    LOG.info("close() timed out before the leader record for [{}] could be deleted; "
+                            + "the row will expire after the configured timeout. "
                             + "To avoid this delay call close() before the DataSource is destroyed (e.g. @PreDestroy).",
-                            getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
+                            groupName);
                 }
             }
             currentLeaderRecordId = null;
+            // Reset daoReady so that the flag accurately reflects the closed state between
+            // this close() and a future elect() call.  initializeImplementation() sets it
+            // back to true once init() succeeds, so re-election is unaffected.
+            daoReady = false;
 
             leaderElectionDAO.close();
         }
@@ -331,6 +388,16 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * @return {@code true} if a matching record was found and the deadline was set
      */
     public boolean forceReleaseRemote(String instanceId) {
+        if (instanceId == null || instanceId.isBlank()) {
+            LOG.warn("forceReleaseRemote: instanceId must not be null or blank.");
+            return false;
+        }
+        try {
+            UUID.fromString(instanceId);
+        } catch (IllegalArgumentException e) {
+            LOG.warn("forceReleaseRemote: instanceId [{}] is not a valid UUID, ignoring.", instanceId);
+            return false;
+        }
         try {
             long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
             long deadline;
@@ -382,8 +449,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         if (super.isLeader() && lastRenewalNanos != NANOS_NOT_SET) {
             if (System.nanoTime() - lastRenewalNanos > getLeaderElectionConfiguration().getRenewDeadline().toNanos()) {
                 LOG.info("Renew deadline exceeded (pre-tick) for [{}], stepping down as leader.", uniqueName);
-                currentLeaderRecordId = null;
-                setLeader(false, null);
+                synchronized (this) {
+                    currentLeaderRecordId = null;
+                    setLeader(false, null);
+                }
                 // Row stays in the DB — handleOwnLeaderTick() will re-acquire it once it
                 // has expired, keeping the behaviour consistent with the non-pre-tick path.
                 return true;
@@ -428,7 +497,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 boolean leaseExpired = currentLeader.getTimestamp() < expiryThreshold;
                 boolean forceReleaseReady = frd != 0 && frd <= dbNow;
                 if (leaseExpired || forceReleaseReady) {
-                    if (closing.get()) {
+                    // Best-effort pre-allocation guard: skip the LeaderElectorRecord (and its UUID)
+                    // allocation when closing or session is already stale. The authoritative check
+                    // remains inside the synchronized block after the DB call.
+                    if (closing.get() || mySession != sessionCounter.get()) {
                         return true;
                     }
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
@@ -437,7 +509,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                     // signalLeaderInvalid() so that close()+elect() cannot interleave between the check
                     // and the setLeader(true)/field writes (Issue 3 fix).
                     synchronized (this) {
-                        if (mySession != sessionCounter || closing.get()) {
+                        if (mySession != sessionCounter.get() || closing.get()) {
                             return true;
                         }
                         if (result > 0) {
@@ -452,7 +524,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                     // Lease still within timeout window — keep the row as a guard until it ages
                     // out, giving any in-flight runIfLeader task the (timeout - renewDeadline)
                     // window to notice and stop before another node can acquire.
-                    currentLeaderRecordId = null;
+                    synchronized (this) {
+                        currentLeaderRecordId = null;
+                    }
                 }
             }
         } else if (frd != 0) {
@@ -460,8 +534,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             // Do NOT delete the row: the deadline guards new acquisitions until frd elapses,
             // preventing a split-brain between our (soon-to-expire) lease and the new leader.
             LOG.info("Force-release deadline detected for [{}], stepping down as leader.", uniqueName);
-            currentLeaderRecordId = null;
-            setLeader(false, null);
+            synchronized (this) {
+                currentLeaderRecordId = null;
+                setLeader(false, null);
+            }
         } else {
             // We are the leader — atomically renew the lease using the DB clock.
             // The UPDATE condition checks force_release_deadline IS NULL so a concurrent
@@ -472,7 +548,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             // signalLeaderInvalid() so that close()+elect() cannot interleave between the check
             // and the setLeader(true)/field writes (Issue 3 fix).
             synchronized (this) {
-                if (mySession != sessionCounter || closing.get()) {
+                if (mySession != sessionCounter.get() || closing.get()) {
                     return true;
                 }
                 if (result > 0) {
@@ -538,7 +614,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         // Both candidate and cap use System.nanoTime() so a wall-clock jump backward
         // (NTP correction, VM resume) cannot extend the backoff window unexpectedly.
         long retryPeriodNanos = getLeaderElectionConfiguration().getRetryPeriod().toNanos();
-        long exp = (long) Math.pow(2, Math.min(consecutiveFailures - 1, 5));
+        long exp = 1L << Math.min(consecutiveFailures - 1, 5);
         long backoffNanos = Math.min(retryPeriodNanos * exp, TimeUnit.MILLISECONDS.toNanos(MAX_BACKOFF_MILLIS));
         long candidate = System.nanoTime() + backoffNanos;
         long renewDeadlineCap;
@@ -562,12 +638,22 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * on first call) so the tick can still proceed — if the DB is truly unreachable the
      * subsequent {@code selectLeaderByName()} call will fail and trigger the normal backoff.
      *
+     * <p><b>Staleness bound:</b> if the cached offset has not been refreshed for more than
+     * {@code 2 × retryPeriod × CLOCK_SYNC_TICKS}, it is reset to zero (pure local clock).
+     * This prevents a prolonged DB outage from letting an arbitrarily old offset silently
+     * skew lease timestamps on recovery.
+     *
      * @return epoch milliseconds anchored to the DB server clock (best-effort)
      */
-    private long getDbNow() {
+    private synchronized long getDbNow() {
         long retryMillis = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
         long now = System.currentTimeMillis();
-        if (lastClockSyncAt == 0 || now - lastClockSyncAt > retryMillis * CLOCK_SYNC_TICKS) {
+        // Saturating multiply: guard against overflow for extreme retryPeriod values.
+        long refreshThresholdMs = retryMillis <= Long.MAX_VALUE / CLOCK_SYNC_TICKS
+                ? retryMillis * CLOCK_SYNC_TICKS : Long.MAX_VALUE;
+        long stalenessThresholdMs = retryMillis <= Long.MAX_VALUE / (CLOCK_SYNC_TICKS * 2L)
+                ? retryMillis * CLOCK_SYNC_TICKS * 2L : Long.MAX_VALUE;
+        if (lastClockSyncAt == 0 || now - lastClockSyncAt > refreshThresholdMs) {
             try {
                 long dbNow = leaderElectionDAO.getDatabaseCurrentTimeMillis();
                 dbClockOffsetMillis = dbNow - now;
@@ -585,6 +671,17 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 }
             }
         }
+        // Staleness bound: if the offset has not been refreshed within twice the normal refresh
+        // window, reset it to zero (fall back to pure local clock). A stale offset that has
+        // drifted during a prolonged DB outage would skew all lease timestamps on recovery.
+        // Lease writes during the outage fail at the DB call regardless, so local time is safe.
+        if (lastClockSyncAt > 0 && now - lastClockSyncAt > stalenessThresholdMs) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("DB clock offset for [{}] is stale ({}ms old), resetting to zero (local clock).",
+                        getLeaderElectionInformation().getElectionGroupName(), now - lastClockSyncAt);
+            }
+            dbClockOffsetMillis = 0;
+        }
         return now + dbClockOffsetMillis;
     }
 
@@ -594,11 +691,11 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      *
      * @author patrick
      */
-    protected class DatabaseElectionHandler implements Runnable {
+    private class DatabaseElectionHandler implements Runnable {
         // Capture the session at construction so that a handler from a previous session
         // (still blocked in a DB call when close() + elect() cycle runs) can detect the
         // session change and discard its result.
-        private final int mySession = sessionCounter;
+        private final int mySession = sessionCounter.get();
 
 
         /**
@@ -606,7 +703,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
          */
         public void run() {
             // Discard ticks that belong to a closed session: close() increments sessionCounter.
-            if (mySession != sessionCounter) {
+            if (mySession != sessionCounter.get()) {
                 return;
             }
             // Do not execute any more ticks after close() has been called.
@@ -646,7 +743,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 LeaderElectorRecord currentLeader = leaderElectionDAO.selectLeaderByName(uniqueName);
                 // Mid-round session/closing guard: a round blocked in selectLeaderByName during a
                 // close()+elect() cycle must not contaminate the new session's state.
-                if (mySession != sessionCounter || closing.get()) {
+                if (mySession != sessionCounter.get() || closing.get()) {
                     return;
                 }
 
@@ -661,7 +758,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                     // signalLeaderInvalid() so that close()+elect() cannot interleave between the
                     // check and the setLeader(true)/field writes (Issue 3 fix).
                     synchronized (DatabaseLeaderElectorImpl.this) {
-                        if (mySession != sessionCounter || closing.get()) {
+                        if (mySession != sessionCounter.get() || closing.get()) {
                             return;
                         }
                         if (result > 0) {
@@ -686,9 +783,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
                     if (leaseExpired || forceReleaseReady) {
                         // Lease expired or force-release deadline elapsed — atomically steal leadership.
-                        // Re-check closing so a tick running through close() does not steal
-                        // leadership that was just released.
-                        if (closing.get()) {
+                        // Best-effort pre-allocation guard: skip LeaderElectorRecord allocation when
+                        // closing or session already stale. Authoritative check is inside synchronized.
+                        if (closing.get() || mySession != sessionCounter.get()) {
                             return;
                         }
                         LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
@@ -700,7 +797,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         // signalLeaderInvalid() so that close()+elect() cannot interleave between the
                         // check and the setLeader(true)/field writes (Issue 3 fix).
                         synchronized (DatabaseLeaderElectorImpl.this) {
-                            if (mySession != sessionCounter || closing.get()) {
+                            if (mySession != sessionCounter.get() || closing.get()) {
                                 return;
                             }
                             if (result > 0) {
@@ -719,6 +816,12 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 backoffUntil = NANOS_NOT_SET;
             } catch (Throwable e) {
                 handleTickError(e, uniqueName);
+                // Errors (OutOfMemoryError, StackOverflowError, …) indicate a JVM-level problem.
+                // Re-throw so the scheduler does not keep firing ticks in a broken state.
+                // handleTickError() has already logged and, if applicable, stepped down as leader.
+                if (e instanceof Error) {
+                    throw (Error) e;
+                }
             } finally {
                 // If close() is in progress OR this round belongs to a stale session (close()+elect()
                 // cycled while blocked in a DB call), AND this round wrote a new row (insert or steal
@@ -726,7 +829,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 // Renewal rows (updateLeaderTimestamp) are excluded: they existed before close()
                 // ran and are removed by close() itself only after closeInternal() has waited for
                 // all running runIfLeader tasks to finish, preventing the split-brain overlap.
-                if ((closing.get() || mySession != sessionCounter) && rowWrittenThisRound) {
+                if ((closing.get() || mySession != sessionCounter.get()) && rowWrittenThisRound) {
                     try {
                         leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
                     } catch (Exception ex) {
