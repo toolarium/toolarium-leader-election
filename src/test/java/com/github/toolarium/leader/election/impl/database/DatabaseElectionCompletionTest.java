@@ -19,9 +19,10 @@ import org.junit.jupiter.api.Test;
 
 
 /**
- * Tests the synchronous-first-round behaviour of the DATABASE strategy using an in-memory H2 database.
- * Because the first election round runs synchronously inside {@code elect()}, {@link ILeaderElector#isLeader()}
- * is accurate the moment the call returns — no additional wait is needed.
+ * Tests the elect() completion behaviour of the DATABASE strategy using an in-memory H2 database.
+ * The first election round runs asynchronously in the scheduler thread; {@code elect()} blocks until
+ * the latch is counted down by the first tick, so {@link ILeaderElector#isLeader()} is accurate
+ * as soon as the call returns (within the given timeout).
  *
  * @author patrick
  */
@@ -97,16 +98,16 @@ public class DatabaseElectionCompletionTest {
 
 
     /**
-     * elect(Duration.ZERO) must return true for DATABASE because the first round runs synchronously
-     * inside elect() — the latch is already counted down before await(0) is called.
+     * elect(short timeout) must return true for DATABASE because the first tick fires with
+     * initialDelay=0 and an in-memory H2 round-trip completes well within 500 ms.
      *
      * @throws Exception In case of an error
      */
     @Test
     public void testElectZeroTimeout() throws Exception {
         ILeaderElector elector = createElector("compl_zero", "compl-zero");
-        assertTrue(elector.elect(Duration.ZERO),
-                "DATABASE elect(ZERO) must return true — first round is synchronous");
+        assertTrue(elector.elect(Duration.ofMillis(500)),
+                "DATABASE elect() must return true — first tick fires immediately (initialDelay=0)");
         assertTrue(elector.isLeader());
         elector.close();
     }

@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -393,12 +392,6 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             return false;
         }
         try {
-            UUID.fromString(instanceId);
-        } catch (IllegalArgumentException e) {
-            LOG.warn("forceReleaseRemote: instanceId [{}] is not a valid UUID, ignoring.", instanceId);
-            return false;
-        }
-        try {
             long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
             long deadline;
             try {
@@ -649,10 +642,18 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         long retryMillis = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
         long now = System.currentTimeMillis();
         // Saturating multiply: guard against overflow for extreme retryPeriod values.
-        long refreshThresholdMs = retryMillis <= Long.MAX_VALUE / CLOCK_SYNC_TICKS
-                ? retryMillis * CLOCK_SYNC_TICKS : Long.MAX_VALUE;
-        long stalenessThresholdMs = retryMillis <= Long.MAX_VALUE / (CLOCK_SYNC_TICKS * 2L)
-                ? retryMillis * CLOCK_SYNC_TICKS * 2L : Long.MAX_VALUE;
+        long refreshThresholdMs;
+        if (retryMillis <= Long.MAX_VALUE / CLOCK_SYNC_TICKS) {
+            refreshThresholdMs = retryMillis * CLOCK_SYNC_TICKS;
+        } else {
+            refreshThresholdMs = Long.MAX_VALUE;
+        }
+        long stalenessThresholdMs;
+        if (retryMillis <= Long.MAX_VALUE / (CLOCK_SYNC_TICKS * 2L)) {
+            stalenessThresholdMs = retryMillis * CLOCK_SYNC_TICKS * 2L;
+        } else {
+            stalenessThresholdMs = Long.MAX_VALUE;
+        }
         if (lastClockSyncAt == 0 || now - lastClockSyncAt > refreshThresholdMs) {
             try {
                 long dbNow = leaderElectionDAO.getDatabaseCurrentTimeMillis();
@@ -691,7 +692,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      *
      * @author patrick
      */
-    private class DatabaseElectionHandler implements Runnable {
+    private final class DatabaseElectionHandler implements Runnable {
         // Capture the session at construction so that a handler from a previous session
         // (still blocked in a DB call when close() + elect() cycle runs) can detect the
         // session change and discard its result.

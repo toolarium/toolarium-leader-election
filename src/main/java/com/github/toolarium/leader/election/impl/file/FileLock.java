@@ -254,39 +254,44 @@ public class FileLock implements AutoCloseable {
      * @throws FileLockException In case the lock can not be acquired.
      */
     public void lock() throws FileLockException {
+        // Capture the stream in a local variable so that a concurrent unlock() call
+        // (which nulls this.outputStream) cannot cause a NullPointerException in the
+        // catch/cleanup blocks below.
+        final FileOutputStream os;
         try {
-            this.outputStream = new FileOutputStream(file);
-            this.isValid = false; 
+            os = new FileOutputStream(file);
+            this.outputStream = os;
+            this.isValid = false;
         } catch (FileNotFoundException ef) {
             throw new FileLockException("Could not aquire the lock [" + getId() + " ] [" + getFile() + "].");
         }
 
         try {
-            this.fileLock = outputStream.getChannel().tryLock();
+            this.fileLock = os.getChannel().tryLock();
             this.lockTime = Instant.now();
         } catch (OverlappingFileLockException | IOException ex) {
             try {
-                outputStream.close();
+                os.close();
             } catch (IOException e) {
                 // NOP
             }
-            
+
             this.lockTime = null;
             this.outputStream = null;
-            this.isValid = false; 
+            this.isValid = false;
             throw new FileLockException("Could not aquire the lock [" + getId() + " ] [" + getFile() + "]: " + ex.getMessage());
         }
-        
+
         if (fileLock == null) {
             try {
-                outputStream.close();
+                os.close();
             } catch (IOException e) {
                 // NOP
             }
-            
+
             this.lockTime = null;
             this.outputStream = null;
-            this.isValid = false; 
+            this.isValid = false;
             throw new FileLockException("Could not aquire the lock of the file " + file + ", invalid state.");
         }
 
