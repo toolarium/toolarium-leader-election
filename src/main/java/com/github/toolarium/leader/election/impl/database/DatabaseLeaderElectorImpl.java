@@ -57,16 +57,12 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private static final long MAX_BACKOFF_MILLIS = 60_000L;
     // Refresh the DB clock offset every CLOCK_SYNC_TICKS ticks; between syncs use System.currentTimeMillis() + dbClockOffsetMillis to avoid an extra DB round-trip per tick.
     private static final int CLOCK_SYNC_TICKS = 5;
-    // Safety cap on getDatabaseElectorViews(): prevents heap pressure when the table
-    // has leaked rows (e.g. crashed nodes that never deleted their row).
+    // Safety cap on getDatabaseElectorViews(): prevents heap pressure when the table has leaked rows (e.g. crashed nodes that never deleted their row).
     private static final int MAX_ELECTOR_ROWS = 1000;
-    // Sentinel for lastRenewalNanos and backoffUntil meaning "not yet set".
-    // Long.MIN_VALUE is used rather than 0 because System.nanoTime() has an arbitrary origin
-    // and may legally return negative values; using 0 as "not set" silently disables the
-    // step-down guards on such platforms.
+    // Sentinel for lastRenewalNanos and backoffUntil meaning "not yet set". Long.MIN_VALUE is used rather than 0 because System.nanoTime() has an arbitrary origin
+    // and may legally return negative values; using 0 as "not set" silently disables the step-down guards on such platforms.
     private static final long NANOS_NOT_SET = Long.MIN_VALUE;
-    // volatile: written by elect() (initialization thread) and read by close() (potentially
-    // from another thread, e.g. the JVM shutdown hook registered by LeaderElectionScheduler).
+    // volatile: written by elect() (initialization thread) and read by close() (potentially from another thread, e.g. the JVM shutdown hook registered by LeaderElectionScheduler).
     private volatile ScheduledExecutorService scheduledExecuterService;
     private volatile ScheduledFuture<?> scheduledFuture;
     private LeaderElectionDAO leaderElectionDAO;
@@ -78,28 +74,21 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private volatile long lastClockSyncAt;
     // AtomicBoolean so close() is idempotent under concurrent calls (e.g. app shutdown + JVM hook).
     private final AtomicBoolean closing;
-    // Monotonically increasing session counter. Incremented by close() so that a
-    // DatabaseElectionHandler from the previous session (still blocked in a DB call) can
-    // detect the session change and discard its result without touching the new session's state.
-    // AtomicInteger makes the increment in close() atomic without relying on the closing CAS.
+    // Monotonically increasing session counter. Incremented by close() so that a DatabaseElectionHandler from the previous session (still blocked in a DB call) can
+    // detect the session change and discard its result without touching the new session's state. AtomicInteger makes the increment in close() atomic without relying on the closing CAS.
     private final AtomicInteger sessionCounter;
-    // Set to true once leaderElectionDAO.init() succeeds; guards the DELETE in close() so that
-    // electors whose elect() was never called (or whose init failed, e.g. allowDdl=false with a
+    // Set to true once leaderElectionDAO.init() succeeds; guards the DELETE in close() so that electors whose elect() was never called (or whose init failed, e.g. allowDdl=false with a
     // missing table) do not emit a noisy INFO log when close() finds no table to delete from.
     private volatile boolean daoReady;
-    // Dedicated lock for dbClockOffsetMillis / lastClockSyncAt so that getDbNow()
-    // (which may execute a DB round-trip) does not block threads waiting for
+    // Dedicated lock for dbClockOffsetMillis / lastClockSyncAt so that getDbNow() (which may execute a DB round-trip) does not block threads waiting for
     // synchronized(this), e.g. close() calling signalLeaderInvalid().
     private final Object clockSyncLock = new Object();
 
     // -----------------------------------------------------------------------
     // Lock acquisition order — MUST be respected to prevent deadlock:
     //   1. lifecycleLock (writeLock or readLock) — AbstractLeaderElectorImpl
-    //   2. synchronized(this) — intrinsic lock used by setLeader(),
-    //      signalLeaderInvalid(), extendLeaseNow(), and the session-check
-    //      blocks in DatabaseElectionHandler / handleOwnLeaderTick()
-    //   3. clockSyncLock — guards dbClockOffsetMillis / lastClockSyncAt only;
-    //      MUST NOT be acquired while holding synchronized(this) or lifecycleLock
+    //   2. synchronized(this) — intrinsic lock used by setLeader(), signalLeaderInvalid(), extendLeaseNow(), and the session-check blocks in DatabaseElectionHandler / handleOwnLeaderTick()
+    //   3. clockSyncLock — guards dbClockOffsetMillis / lastClockSyncAt only; MUST NOT be acquired while holding synchronized(this) or lifecycleLock
     // -----------------------------------------------------------------------
 
 
@@ -133,11 +122,11 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     protected void initializeImplementation() throws LeaderElectionException {
         // Allow reuse after close().
         closing.set(false);
-        daoReady = false;              // reset until init() succeeds below
-        lastClockSyncAt = 0;           // force a fresh DB clock sync on (re-)initialization
+        daoReady = false;                 // reset until init() succeeds below
+        lastClockSyncAt = 0;              // force a fresh DB clock sync on (re-)initialization
         lastRenewalNanos = NANOS_NOT_SET; // reset nanoTime sentinel so step-down guards are fresh
-        backoffUntil = NANOS_NOT_SET;  // reset backoff on re-initialization
-        consecutiveFailures = 0;       // reset failure count so log level and backoff start fresh
+        backoffUntil = NANOS_NOT_SET;     // reset backoff on re-initialization
+        consecutiveFailures = 0;          // reset failure count so log level and backoff start fresh
 
         LeaderElectionInformation info = getLeaderElectionInformation();
         if ((info.getNamespace() == null || info.getNamespace().isBlank()) && (info.getName() == null || info.getName().isBlank())) {
@@ -159,11 +148,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         };
         scheduledExecuterService = Executors.newScheduledThreadPool(1, daemonFactory);
         long retryMillis = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
-        // initialDelay=0: the first tick fires in the scheduler's daemon thread immediately
-        // after the writeLock from startElectionIfNeeded() is released, so runIfLeader()
-        // callers are not blocked for a DB round-trip at startup.
-        // elect() blocks on electionLatch.await() until the first tick calls setLeader(),
-        // which counts down the latch — the result is visible as soon as the DB responds.
+        // initialDelay=0: the first tick fires in the scheduler's daemon thread immediately after the writeLock from startElectionIfNeeded() is released, so runIfLeader()
+        // callers are not blocked for a DB round-trip at startup. elect() blocks on electionLatch.await() until the first tick calls setLeader(), which counts down 
+        // the latch — the result is visible as soon as the DB responds.
         scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(
                 new DatabaseElectionHandler(), 0, retryMillis, TimeUnit.MILLISECONDS);
     }
@@ -184,10 +171,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             long dbNow = getDbNow();
             LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
             int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
-            // Synchronize on the same intrinsic lock as setLeader/signalLeaderInvalid so that
-            // a concurrent close() cannot interleave between the field writes and setLeader(true).
-            // Re-read via super.isLeader() on the true-branch in case electionClosed caused
-            // setLeader(true) to be refused — in that case return false, not true.
+            // Synchronize on the same intrinsic lock as setLeader/signalLeaderInvalid so that a concurrent close() cannot interleave between the field writes and setLeader(true).
+            // Re-read via super.isLeader() on the true-branch in case electionClosed caused setLeader(true) to be refused — in that case return false, not true.
             synchronized (this) {
                 if (result > 0) {
                     currentLeaderRecordId = newRecord.getId();
@@ -208,8 +193,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
     /**
      * @see com.github.toolarium.leader.election.ILeaderElector#isLeader()
-     *     Overrides the cached boolean with a monotonic-clock expiry check so that a
-     *     stuck election thread (e.g. blocked network I/O) cannot keep returning
+     *     Overrides the cached boolean with a monotonic-clock expiry check so that a stuck election thread (e.g. blocked network I/O) cannot keep returning
      *     {@code true} after the renewDeadline has passed.
      */
     @Override
