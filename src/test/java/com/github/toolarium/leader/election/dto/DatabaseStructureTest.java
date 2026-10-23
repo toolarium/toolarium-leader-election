@@ -34,6 +34,7 @@ public class DatabaseStructureTest {
     private static final String CUSTOM_TABLE = "MyCustomTable";
     private static final String LEASE_TS_COL = "lease_ts";
     private static final String INSTANCE_COL = "instance";
+    private static final String FORCE_RELEASE_DEADLINE_COL = "force_release_deadline";
 
 
     /**
@@ -61,10 +62,21 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLSelectLeaderByName().endsWith(SEMICOLON));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains("WHERE name = ? AND instance = ?"));
+        assertTrue(s.createSQLUpdateLeaderTimestamp().contains(FORCE_RELEASE_DEADLINE_COL + " IS NULL"));
         assertTrue(s.createSQLUpdateLeaderTimestamp().endsWith(SEMICOLON));
         assertTrue(s.createSQLStealLeadership().contains(DEFAULT_TABLE));
-        assertTrue(s.createSQLStealLeadership().contains("WHERE name = ? AND id = ? AND lease_ts < ?"));
+        assertTrue(s.createSQLStealLeadership().contains("lease_ts < ?"));
+        assertTrue(s.createSQLStealLeadership().contains(FORCE_RELEASE_DEADLINE_COL));
+        assertTrue(s.createSQLStealLeadership().contains(FORCE_RELEASE_DEADLINE_COL + " = NULL"));
         assertTrue(s.createSQLStealLeadership().endsWith(SEMICOLON));
+        assertNotNull(s.createSQLSetForceReleaseDeadline());
+        assertTrue(s.createSQLSetForceReleaseDeadline().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLSetForceReleaseDeadline().contains(FORCE_RELEASE_DEADLINE_COL));
+        assertTrue(s.createSQLSetForceReleaseDeadline().endsWith(SEMICOLON));
+        assertNotNull(s.createSQLAddForceReleaseDeadlineColumn());
+        assertTrue(s.createSQLAddForceReleaseDeadlineColumn().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLAddForceReleaseDeadlineColumn().contains(FORCE_RELEASE_DEADLINE_COL));
+        assertTrue(s.createSQLAddForceReleaseDeadlineColumn().endsWith(SEMICOLON));
         assertNotNull(s.createSQLSelectCurrentTimestampMillis());
         assertTrue(s.createSQLSelectCurrentTimestampMillis().toUpperCase().contains("CURRENT_TIMESTAMP"));
         assertTrue(s.createSQLRenameTimestampColumn().contains(DEFAULT_TABLE));
@@ -73,6 +85,7 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLRenameTimestampColumn().endsWith(SEMICOLON));
         assertTrue(s.createSQLSelectAll().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLSelectAll().contains(LEASE_TS_COL));
+        assertTrue(s.createSQLSelectAll().contains(FORCE_RELEASE_DEADLINE_COL));
         assertTrue(s.createSQLSelectAll().endsWith(SEMICOLON));
     }
 
@@ -102,12 +115,23 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLDeleteLeaderByInstance().contains("WHERE instance = ?"));
         assertTrue(!s.createSQLDeleteLeaderByInstance().endsWith(SEMICOLON));
         assertTrue(s.createSQLSelectLeaderByName().contains("SELECT id, name"));
+        assertTrue(s.createSQLSelectLeaderByName().contains(FORCE_RELEASE_DEADLINE_COL));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains("WHERE name = ? AND instance = ?"));
+        assertTrue(s.createSQLUpdateLeaderTimestamp().contains(FORCE_RELEASE_DEADLINE_COL + " IS NULL"));
         assertTrue(!s.createSQLUpdateLeaderTimestamp().endsWith(SEMICOLON));
         assertTrue(s.createSQLStealLeadership().contains(DEFAULT_TABLE));
-        assertTrue(s.createSQLStealLeadership().contains("WHERE name = ? AND id = ? AND lease_ts < ?"));
+        assertTrue(s.createSQLStealLeadership().contains("lease_ts < ?"));
+        assertTrue(s.createSQLStealLeadership().contains(FORCE_RELEASE_DEADLINE_COL));
+        assertTrue(s.createSQLStealLeadership().contains(FORCE_RELEASE_DEADLINE_COL + " = NULL"));
         assertTrue(!s.createSQLStealLeadership().endsWith(SEMICOLON));
+        assertNotNull(s.createSQLSetForceReleaseDeadline());
+        assertTrue(s.createSQLSetForceReleaseDeadline().contains(FORCE_RELEASE_DEADLINE_COL));
+        assertTrue(!s.createSQLSetForceReleaseDeadline().endsWith(SEMICOLON));
+        assertNotNull(s.createSQLAddForceReleaseDeadlineColumn());
+        assertTrue(s.createSQLAddForceReleaseDeadlineColumn().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLAddForceReleaseDeadlineColumn().contains(FORCE_RELEASE_DEADLINE_COL));
+        assertTrue(!s.createSQLAddForceReleaseDeadlineColumn().endsWith(SEMICOLON));
         assertNotNull(s.createSQLSelectCurrentTimestampMillis());
         assertTrue(!s.createSQLSelectCurrentTimestampMillis().endsWith(SEMICOLON));
         assertTrue(s.createSQLRenameTimestampColumn().contains(DEFAULT_TABLE));
@@ -176,8 +200,12 @@ public class DatabaseStructureTest {
         assertNotNull(s.createSQLIndex());
         assertTrue(s.createSQLIndex().contains(INSTANCE_COL));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(DEFAULT_TABLE));
+        assertTrue(s.createSQLUpdateLeaderTimestamp().contains(FORCE_RELEASE_DEADLINE_COL + " IS NULL"));
         assertTrue(!s.createSQLUpdateLeaderTimestamp().endsWith(SEMICOLON));
         assertTrue(s.createSQLSelectCurrentTimestampMillis().contains("FROM DUAL"));
+        // Oracle uses NUMBER(19) for force_release_deadline too
+        assertTrue(s.createSQLAddForceReleaseDeadlineColumn().contains("NUMBER(19)"));
+        assertTrue(!s.createSQLAddForceReleaseDeadlineColumn().endsWith(SEMICOLON));
         // Oracle inherits standard RENAME COLUMN (works in Oracle 9i+)
         assertTrue(s.createSQLRenameTimestampColumn().toUpperCase().contains("RENAME COLUMN"));
         assertTrue(s.createSQLRenameTimestampColumn().contains(LEASE_TS_COL));
@@ -292,6 +320,8 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLSelectLeaderByName().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLUpdateLeaderTimestamp().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLStealLeadership().contains(CUSTOM_TABLE));
+        assertTrue(s.createSQLSetForceReleaseDeadline().contains(CUSTOM_TABLE));
+        assertTrue(s.createSQLAddForceReleaseDeadlineColumn().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLRenameTimestampColumn().contains(CUSTOM_TABLE));
         assertTrue(s.createSQLSelectAll().contains(CUSTOM_TABLE));
     }
@@ -342,7 +372,8 @@ public class DatabaseStructureTest {
         assertTrue(cols.contains(INSTANCE_COL));
         assertTrue(cols.contains("username"));
         assertTrue(cols.contains(LEASE_TS_COL));
+        assertTrue(cols.contains(FORCE_RELEASE_DEADLINE_COL));
         assertFalse(cols.contains("timestamp"), "Legacy column name must not appear in expected set");
-        assertTrue(cols.size() == 5, "Exactly 5 columns expected");
+        assertTrue(cols.size() == 6, "Exactly 6 columns expected");
     }
 }

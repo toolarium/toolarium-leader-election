@@ -171,7 +171,7 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
          * @return the leader election table query
          */
         public String createSQLTable() {
-            return "CREATE TABLE " + getTableName() + "(id varchar(36) not NULL, name varchar(512) not NULL, instance varchar(255), username varchar(255), lease_ts bigint not NULL, PRIMARY KEY (name));";
+            return "CREATE TABLE " + getTableName() + "(id varchar(36) not NULL, name varchar(512) not NULL, instance varchar(255), username varchar(255), lease_ts bigint not NULL, force_release_deadline bigint NULL, PRIMARY KEY (name));";
         }
 
 
@@ -248,7 +248,7 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
          * @return the select-all statement
          */
         public String createSQLSelectAll() {
-            return "SELECT id, name, instance, username, lease_ts FROM " + getTableName() + ";";
+            return "SELECT id, name, instance, username, lease_ts, force_release_deadline FROM " + getTableName() + ";";
         }
 
 
@@ -258,33 +258,62 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
          * @return the leader election table query
          */
         public String createSQLSelectLeaderByName() {
-            return "SELECT id, name, instance, username, lease_ts FROM " + getTableName() + " WHERE name = ?;";
+            return "SELECT id, name, instance, username, lease_ts, force_release_deadline FROM " + getTableName() + " WHERE name = ?;";
         }
 
 
         /**
          * Create the update statement for renewing the leader timestamp.
-         * Updates id and lease_ts only when name and instance both match, ensuring atomic renewal.
+         * Updates id and lease_ts only when name and instance both match AND no admin
+         * force-release deadline is pending. This prevents a force-released holder from
+         * inadvertently extending its own lease before it discovers the deadline.
          *
          * @return the update statement
          */
         public String createSQLUpdateLeaderTimestamp() {
-            return "UPDATE " + getTableName() + " SET id = ?, lease_ts = ? WHERE name = ? AND instance = ?;";
+            return "UPDATE " + getTableName() + " SET id = ?, lease_ts = ? WHERE name = ? AND instance = ? AND force_release_deadline IS NULL;";
         }
 
 
         /**
-         * Create the update statement for atomically stealing an expired lease.
-         * Only succeeds when the row identified by name and id still exists and its
-         * lease_ts is older than the supplied expiry threshold (epoch milliseconds).
-         * Parameters: newId, newInstance, newUsername, newLease_ts, name, currentLeaderId, expiryThreshold
+         * Create the update statement for atomically stealing an expired or force-released lease.
+         * Only succeeds when the row identified by name and id still exists and either the
+         * lease has expired (lease_ts older than expiryThreshold) OR an admin force-release
+         * deadline has elapsed (force_release_deadline is set and in the past).
+         * The stolen row has force_release_deadline reset to NULL.
+         * Parameters: newId, newInstance, newUsername, newLease_ts, name, currentLeaderId, expiryThreshold, dbNow
          *
          * @return the steal-leadership update statement
          */
         public String createSQLStealLeadership() {
             return "UPDATE " + getTableName()
-                    + " SET id = ?, instance = ?, username = ?, lease_ts = ?"
-                    + " WHERE name = ? AND id = ? AND lease_ts < ?;";
+                    + " SET id = ?, instance = ?, username = ?, lease_ts = ?, force_release_deadline = NULL"
+                    + " WHERE name = ? AND id = ? AND (lease_ts < ? OR (force_release_deadline IS NOT NULL AND force_release_deadline <= ?));";
+        }
+
+
+        /**
+         * Create the update statement that sets the admin force-release deadline for a given instance.
+         * Targeted by stable instance id so a single round-trip suffices regardless of election group name.
+         * Parameters: deadlineMillis, instanceId
+         *
+         * @return the set-force-release-deadline update statement
+         */
+        public String createSQLSetForceReleaseDeadline() {
+            return "UPDATE " + getTableName() + " SET force_release_deadline = ? WHERE instance = ?;";
+        }
+
+
+        /**
+         * Create the DDL statement that adds the {@code force_release_deadline} column to an
+         * existing leader-election table (schema migration from v1 to v2).
+         * Subclasses must override when the target database uses non-standard ADD COLUMN syntax
+         * (e.g. Oracle wraps the column definition in parentheses and uses NUMBER(19)).
+         *
+         * @return the add-column DDL statement
+         */
+        public String createSQLAddForceReleaseDeadlineColumn() {
+            return "ALTER TABLE " + getTableName() + " ADD COLUMN force_release_deadline BIGINT NULL;";
         }
 
 
@@ -321,7 +350,7 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
          * @return expected column names in lowercase
          */
         public Set<String> getExpectedColumnNames() {
-            return new LinkedHashSet<>(Arrays.asList("id", "name", "instance", "username", "lease_ts"));
+            return new LinkedHashSet<>(Arrays.asList("id", "name", "instance", "username", "lease_ts", "force_release_deadline"));
         }
     }
 }

@@ -51,10 +51,11 @@ public class LeaderElectionDAO {
     public LeaderElectionDAO(DatabaseLeaderElectionConfiguration leaderElectionConfiguration) {
         this.leaderElectionConfiguration = leaderElectionConfiguration;
         this.leaderElectionDatabaseStructure = leaderElectionConfiguration.getLeaderElectionDatabaseStructure();
-        // Bound each statement to the retry period so a hanging DB call cannot block
-        // the election thread indefinitely (Issue #1: leader never steps down on DB hang).
-        long retryMillis = leaderElectionConfiguration.getRetryPeriod().toMillis();
-        this.queryTimeoutSeconds = Math.max(1, (int) ((retryMillis + 999) / 1000));
+        // Cap each statement timeout so the whole tick (up to 3 sequential statements) fits
+        // within renewDeadline. Using retryPeriod alone allowed 3 * retryPeriod per tick,
+        // which could exceed renewDeadline and create a split-brain window.
+        long renewMillis = leaderElectionConfiguration.getRenewDeadline().toMillis();
+        this.queryTimeoutSeconds = Math.max(1, (int) ((renewMillis / 3 + 999) / 1000));
     }
 
 
@@ -266,7 +267,16 @@ public class LeaderElectionDAO {
                     } else {
                         leaseTs = Long.parseLong(columns[4].toString());
                     }
-                    LeaderElectorRecord record = new LeaderElectorRecord((String) columns[0], (String) columns[1], (String) columns[2], (String) columns[3], leaseTs);
+                    // columns[5] is force_release_deadline — nullable; 0 means not set.
+                    long forceReleaseDeadline = 0L;
+                    if (columns.length > 5 && columns[5] != null) {
+                        if (columns[5] instanceof Number) {
+                            forceReleaseDeadline = ((Number) columns[5]).longValue();
+                        } else {
+                            forceReleaseDeadline = Long.parseLong(columns[5].toString());
+                        }
+                    }
+                    LeaderElectorRecord record = new LeaderElectorRecord((String) columns[0], (String) columns[1], (String) columns[2], (String) columns[3], leaseTs, forceReleaseDeadline);
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("Leader found: id={}, name={}, instance={}", record.getId(), record.getName(), record.getInstance());
                     }
@@ -300,9 +310,17 @@ public class LeaderElectionDAO {
                         } else {
                             leaseTs = Long.parseLong(columns[4].toString());
                         }
+                        long forceReleaseDeadline = 0L;
+                        if (columns.length > 5 && columns[5] != null) {
+                            if (columns[5] instanceof Number) {
+                                forceReleaseDeadline = ((Number) columns[5]).longValue();
+                            } else {
+                                forceReleaseDeadline = Long.parseLong(columns[5].toString());
+                            }
+                        }
                         result.add(new LeaderElectorRecord(
                             (String) columns[0], (String) columns[1],
-                            (String) columns[2], (String) columns[3], leaseTs));
+                            (String) columns[2], (String) columns[3], leaseTs, forceReleaseDeadline));
                     }
                 }
             }
@@ -334,26 +352,53 @@ public class LeaderElectionDAO {
 
 
     /**
-     * Atomically steal an expired leadership by updating the row in a single statement.
-     * The update only succeeds when the row's id still matches {@code currentLeaderId} AND
-     * {@code lease_ts} is older than {@code expiryThreshold} (i.e. the lease has expired).
+     * Atomically steal an expired or force-released leadership by updating the row in a single statement.
+     * The update only succeeds when the row's id still matches {@code currentLeaderId} AND either:
+     * <ul>
+     *   <li>the lease has expired ({@code lease_ts < expiryThreshold}), OR</li>
+     *   <li>an admin force-release deadline has elapsed ({@code force_release_deadline IS NOT NULL AND force_release_deadline <= dbNow}).</li>
+     * </ul>
+     * The stolen row has {@code force_release_deadline} reset to {@code NULL}.
      * Returns 0 when another node won the race (no matching row updated).
      *
      * @param name the election group name
      * @param currentLeaderId the id of the row we expect to steal
      * @param expiryThreshold epoch-millis threshold: the stored lease_ts must be strictly less than this value
+     * @param dbNow current DB-clock epoch millis for the force-release deadline comparison
      * @param newRecord the challenger's new leader record
      * @return number of updated rows (1 on success, 0 if the row no longer matches)
      * @throws SQLException In case of a database error
      */
-    public int stealLeadership(String name, String currentLeaderId, long expiryThreshold, LeaderElectorRecord newRecord) throws SQLException {
+    public int stealLeadership(String name, String currentLeaderId, long expiryThreshold, long dbNow, LeaderElectorRecord newRecord) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
              PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLStealLeadership())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {
                 newRecord.getId(), newRecord.getInstance(), newRecord.getUser(),
-                newRecord.getTimestamp(), name, currentLeaderId, expiryThreshold
+                newRecord.getTimestamp(), name, currentLeaderId, expiryThreshold, dbNow
             });
+            int rows = stmt.executeUpdate();
+            commitIfNeeded(conn);
+            return rows;
+        }
+    }
+
+
+    /**
+     * Set the admin force-release deadline for the leader identified by the given stable instance id.
+     * After the deadline elapses, no node (including the current holder) may hold or acquire
+     * leadership until a new election completes normally.
+     *
+     * @param instanceId the stable elector instance id of the leader to force-release
+     * @param deadlineMillis the force-release deadline as epoch milliseconds
+     * @return number of updated rows (1 if found, 0 if not found)
+     * @throws SQLException In case of a database error
+     */
+    public int setForceReleaseDeadline(String instanceId, long deadlineMillis) throws SQLException {
+        try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
+             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLSetForceReleaseDeadline())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
+            JDBCUtil.getInstance().setValues(stmt, new Object[] {deadlineMillis, instanceId});
             int rows = stmt.executeUpdate();
             commitIfNeeded(conn);
             return rows;
@@ -420,6 +465,28 @@ public class LeaderElectionDAO {
                 }
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Column 'timestamp' in table {} was renamed concurrently by another node.", tableName);
+                }
+            }
+        }
+
+        // Auto-migrate: add force_release_deadline column if missing (schema v1 → v2)
+        if (!columns.contains("force_release_deadline")) {
+            String tableName = leaderElectionDatabaseStructure.getTableName();
+            LOG.info("Migrating schema: adding column 'force_release_deadline' to table {}...", tableName);
+            try {
+                try (Statement stmt = conn.createStatement()) {
+                    stmt.execute(leaderElectionDatabaseStructure.createSQLAddForceReleaseDeadlineColumn());
+                }
+                LOG.info("Schema migration of table {} completed (force_release_deadline added).", tableName);
+                columns.add("force_release_deadline");
+            } catch (SQLException e) {
+                // Concurrent migration: another node may have added the column simultaneously — re-check before failing.
+                columns = getExistingColumns(conn);
+                if (!columns.contains("force_release_deadline")) {
+                    throw e;
+                }
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Column 'force_release_deadline' in table {} was added concurrently by another node.", tableName);
                 }
             }
         }

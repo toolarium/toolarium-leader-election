@@ -26,7 +26,7 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
      */
     @Override
     public String createSQLTable() {
-        return "CREATE TABLE " + getTableName() + "(id varchar(36) not NULL, name varchar(512) not NULL, instance varchar(255), username varchar(255), lease_ts bigint not NULL, PRIMARY KEY (name))";
+        return "CREATE TABLE " + getTableName() + "(id varchar(36) not NULL, name varchar(512) not NULL, instance varchar(255), username varchar(255), lease_ts bigint not NULL, force_release_deadline bigint NULL, PRIMARY KEY (name))";
     }
 
 
@@ -93,7 +93,7 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
      */
     @Override
     public String createSQLSelectAll() {
-        return "SELECT id, name, instance, username, lease_ts FROM " + getTableName();
+        return "SELECT id, name, instance, username, lease_ts, force_release_deadline FROM " + getTableName();
     }
 
 
@@ -102,7 +102,7 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
      */
     @Override
     public String createSQLSelectLeaderByName() {
-        return "SELECT id, name, instance, username, lease_ts FROM " + getTableName() + " WHERE name = ?";
+        return "SELECT id, name, instance, username, lease_ts, force_release_deadline FROM " + getTableName() + " WHERE name = ?";
     }
 
 
@@ -111,7 +111,7 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
      */
     @Override
     public String createSQLUpdateLeaderTimestamp() {
-        return "UPDATE " + getTableName() + " SET id = ?, lease_ts = ? WHERE name = ? AND instance = ?";
+        return "UPDATE " + getTableName() + " SET id = ?, lease_ts = ? WHERE name = ? AND instance = ? AND force_release_deadline IS NULL";
     }
 
 
@@ -121,8 +121,26 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
     @Override
     public String createSQLStealLeadership() {
         return "UPDATE " + getTableName()
-                + " SET id = ?, instance = ?, username = ?, lease_ts = ?"
-                + " WHERE name = ? AND id = ? AND lease_ts < ?";
+                + " SET id = ?, instance = ?, username = ?, lease_ts = ?, force_release_deadline = NULL"
+                + " WHERE name = ? AND id = ? AND (lease_ts < ? OR (force_release_deadline IS NOT NULL AND force_release_deadline <= ?))";
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLSetForceReleaseDeadline()
+     */
+    @Override
+    public String createSQLSetForceReleaseDeadline() {
+        return "UPDATE " + getTableName() + " SET force_release_deadline = ? WHERE instance = ?";
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLAddForceReleaseDeadlineColumn()
+     */
+    @Override
+    public String createSQLAddForceReleaseDeadlineColumn() {
+        return "ALTER TABLE " + getTableName() + " ADD COLUMN force_release_deadline BIGINT NULL";
     }
 
 

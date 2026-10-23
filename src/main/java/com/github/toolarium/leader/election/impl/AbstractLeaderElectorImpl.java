@@ -44,7 +44,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
     private volatile CountDownLatch electionLatch;
     private volatile boolean electionClosed;
     private final AtomicLong leadershipTerm;
-    private volatile boolean extendingInProgress;
+    private final ThreadLocal<Boolean> extendingInProgress;
     private final Map<String, ReentrantLock> taskLocks;
     private final LeaderLeaseMonitor leaseMonitor;
     private final ReadWriteLock lifecycleLock;
@@ -66,7 +66,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         electionLatch = new CountDownLatch(1);
         electionClosed = false;
         leadershipTerm = new AtomicLong(0);
-        extendingInProgress = false;
+        extendingInProgress = ThreadLocal.withInitial(() -> Boolean.FALSE);
         taskLocks = new ConcurrentHashMap<>();
         leaseMonitor = new LeaderLeaseMonitor();
         lifecycleLock = new ReentrantReadWriteLock();
@@ -193,6 +193,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                 LOG.info("Released lead of [{}].", leaderElectionInformation.getUniqueName());
             }
             LeaderElectionScheduler.getInstance().unregister(this);
+            leaseMonitor.stop();
             description = null;
             isInitialized = false;
             electionLatch.countDown();           // unblock any elect() waiting on the old latch
@@ -245,8 +246,8 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                 task.run(lease);
                 return true;
             } catch (InterruptedException e) {
-                // If the interrupt came from the lease monitor (leadership lost), do NOT restore
-                // the interrupt flag — it would leak to the caller after runIfLeader() returns.
+                // Catching InterruptedException clears the flag. Re-set it for non-monitor
+                // interrupts so the finally block can decide whether to forward it to the caller.
                 if (!lease.wasInterruptedByMonitor()) {
                     Thread.currentThread().interrupt();
                 }
@@ -259,12 +260,18 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
             } catch (Exception e) {
                 throw new LeaderElectionException("Task '" + name + "' failed: " + e.getMessage(), e);
             } finally {
-                // If the monitor set the interrupt flag (e.g. the task never hit a blocking op),
-                // clear it here so it does not leak to the caller thread.
-                if (lease.wasInterruptedByMonitor()) {
-                    Thread.interrupted();
-                }
+                // Unregister FIRST so the monitor stops watching this lease.
+                // Then clear-and-conditionally-restore the interrupt flag:
+                // Thread.interrupted() atomically clears the flag and returns the old value.
+                // If it was set and did NOT come from the monitor, restore it so the
+                // caller sees a legitimate external interrupt.
+                // Placing this after unregister closes the race where the monitor fires
+                // just after task.run() returns and sets interruptedByMonitor=true.
                 leaseMonitor.unregister(lease);
+                boolean wasInterrupted = Thread.interrupted();
+                if (wasInterrupted && !lease.wasInterruptedByMonitor()) {
+                    Thread.currentThread().interrupt();
+                }
                 taskLock.unlock();
                 // Remove the entry when no thread is holding the lock to prevent
                 // unbounded map growth with many distinct task names.
@@ -318,11 +325,11 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * @throws LeaderElectionException if the extension attempt fails with an unrecoverable error
      */
     boolean extendLease() throws LeaderElectionException {
-        extendingInProgress = true;
+        extendingInProgress.set(Boolean.TRUE);
         try {
             return extendLeaseNow();
         } finally {
-            extendingInProgress = false;
+            extendingInProgress.set(Boolean.FALSE);
         }
     }
 
@@ -352,7 +359,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
             // I'm the leader — update timestamp on every confirmation so getRemainingLeadTime()
             // reflects the last renewal/extension rather than only the initial acquisition.
             if (this.isLeader == null || !this.isLeader) {
-                if (!extendingInProgress) {
+                if (!extendingInProgress.get()) {
                     // Real acquisition: increment the term so leases from previous terms
                     // cannot become valid again after a lead loss + re-gain.
                     leadershipTerm.incrementAndGet();
@@ -431,6 +438,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
             // Re-check under lock: another thread may have initialized between the volatile read above and lock acquisition.
             if (!isInitialized) {
                 electionClosed = false;
+                leaseMonitor.start();
                 initializeImplementation();
                 isInitialized = true;
             }

@@ -63,6 +63,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private volatile int consecutiveFailures;
     private volatile long backoffUntil;
     private volatile long lastSuccessfulRenewalAt;
+    private volatile long lastRenewalNanos;
     private volatile long dbClockOffsetMillis;
     private volatile long lastClockSyncAt;
     // AtomicBoolean so close() is idempotent under concurrent calls (e.g. app shutdown + JVM hook).
@@ -84,6 +85,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         this.consecutiveFailures = 0;
         this.backoffUntil = 0;
         this.lastSuccessfulRenewalAt = 0;
+        this.lastRenewalNanos = 0L;
         this.dbClockOffsetMillis = 0;
         this.lastClockSyncAt = 0;
         this.closing = new AtomicBoolean(false);
@@ -145,6 +147,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             if (result > 0) {
                 currentLeaderRecordId = newRecord.getId();
                 lastSuccessfulRenewalAt = System.currentTimeMillis();
+                lastRenewalNanos = System.nanoTime();
                 setLeader(true, null);
                 return true;
             } else {
@@ -155,6 +158,26 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         } catch (Exception e) {
             throw new LeaderElectionException("Could not extend leader lease: " + e.getMessage(), e);
         }
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.ILeaderElector#isLeader()
+     *     Overrides the cached boolean with a monotonic-clock expiry check so that a
+     *     stuck election thread (e.g. blocked network I/O) cannot keep returning
+     *     {@code true} after the renewDeadline has passed.
+     */
+    @Override
+    public boolean isLeader() {
+        if (!super.isLeader()) {
+            return false;
+        }
+        long nanos = lastRenewalNanos;
+        if (nanos == 0L) {
+            return true; // elected this tick, nanos not yet set
+        }
+        return System.nanoTime() - nanos
+                <= getLeaderElectionConfiguration().getRenewDeadline().toNanos();
     }
 
 
@@ -240,25 +263,42 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
     /**
      * Force-release the leadership of a remote node identified by its stable instance id.
-     * This deletes the row from the database so another node can take over immediately.
      *
-     * <p><b>Note:</b> the remote node will not know its lease was revoked until its next
-     * election tick (up to {@code retryPeriod} away). During that window both the remote
-     * node and a new leader may run concurrently. Callers should account for this overlap
-     * or use {@code forceRelease} on the local elector object when possible.
+     * <p>Sets a {@code force_release_deadline} in the database row equal to
+     * {@code dbNow + renewDeadline}. This prevents the remote holder from renewing its lease
+     * and prevents any other node from acquiring leadership until the deadline elapses.
+     * Combined with the local {@code isLeader()} monotonic-expiry check (Fix 1), this
+     * eliminates the split-brain window that would otherwise occur with a plain row delete:
+     * the current holder's lease expires at most {@code renewDeadline} after the last renewal,
+     * and no other node may acquire before the same point.
+     *
+     * <p><b>Overlap bound:</b> the remote node steps down on its next scheduler tick (up to
+     * {@code retryPeriod} after the deadline is written). A new leader can only acquire after
+     * the deadline elapses (= {@code renewDeadline} from now). Since {@code renewDeadline >= retryPeriod},
+     * the new leader acquires only after the old holder has already stepped down — no split-brain.
      *
      * @param instanceId the stable instance id ({@link ILeaderElectorView#getId()}) of the remote leader
-     * @return {@code true} if a matching record was found and deleted
+     * @return {@code true} if a matching record was found and the deadline was set
      */
     public boolean forceReleaseRemote(String instanceId) {
         try {
-            int deleted = leaderElectionDAO.deleteLeaderByInstance(instanceId);
-            if (deleted > 0) {
-                LOG.info("Force-released remote leader record for instance [{}].", instanceId);
+            long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
+            long deadline;
+            try {
+                deadline = leaderElectionDAO.getDatabaseCurrentTimeMillis() + renewDeadlineMillis;
+            } catch (Exception e) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Could not fetch DB clock for force-release [{}], using local clock: {}", instanceId, e.getMessage());
+                }
+                deadline = System.currentTimeMillis() + renewDeadlineMillis;
+            }
+            int updated = leaderElectionDAO.setForceReleaseDeadline(instanceId, deadline);
+            if (updated > 0) {
+                LOG.info("Force-release deadline set for remote leader instance [{}] (deadline in {}ms).", instanceId, renewDeadlineMillis);
                 return true;
             }
         } catch (Exception e) {
-            LOG.warn("Could not force-release remote leader [{}]: {}", instanceId, e.getMessage());
+            LOG.warn("Could not set force-release deadline for remote leader [{}]: {}", instanceId, e.getMessage());
         }
         return false;
     }
@@ -318,29 +358,52 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
                 if (currentLeader == null) {
                     // No leader exists — try to become one.
+                    // Re-check closing AFTER the SELECT so a tick that was already running when
+                    // close() fired cannot re-insert the row that close() just deleted.
+                    if (closing.get()) {
+                        return;
+                    }
                     LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                     int result = leaderElectionDAO.insertLeader(newRecord);
                     if (result > 0) {
                         currentLeaderRecordId = newRecord.getId();
                         lastSuccessfulRenewalAt = System.currentTimeMillis();
+                        lastRenewalNanos = System.nanoTime();
                         setLeader(true, null);
                     } else {
                         setLeader(false, null);
                     }
                 } else if (instanceId.equals(currentLeader.getInstance())) {
+                    long frd = currentLeader.getForceReleaseDeadline();
                     if (!isLeader()) {
-                        // We hold the DB row but have already stepped down locally (renew deadline
-                        // exceeded before this tick ran). Release the DB record so another node
-                        // can take over without waiting for the full timeout.
-                        leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
+                        // We hold the DB row but have already stepped down locally (renew deadline exceeded
+                        // or force-release processed on a previous tick).
+                        if (frd != 0 && frd > dbNow) {
+                            // Force-release deadline still in the future — keep the row as a guard so no
+                            // other node can acquire before the deadline elapses. Nothing to do this tick.
+                        } else {
+                            // Normal pre-tick step-down or deadline has passed: delete the row so another
+                            // node can take over immediately.
+                            leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
+                            currentLeaderRecordId = null;
+                        }
+                    } else if (frd != 0) {
+                        // Admin requested force-release — step down without renewing.
+                        // Do NOT delete the row: the deadline guards new acquisitions until frd elapses,
+                        // preventing a split-brain between our (soon-to-expire) lease and the new leader.
+                        LOG.info("Force-release deadline detected for [{}], stepping down as leader.", uniqueName);
                         currentLeaderRecordId = null;
+                        setLeader(false, null);
                     } else {
                         // We are the leader — atomically renew the lease using the DB clock.
+                        // The UPDATE condition also checks force_release_deadline IS NULL so a concurrent
+                        // forceRelease that set the deadline between our SELECT and UPDATE cannot be bypassed.
                         LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
                         int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
                         if (result > 0) {
                             currentLeaderRecordId = newRecord.getId();
                             lastSuccessfulRenewalAt = System.currentTimeMillis();
+                            lastRenewalNanos = System.nanoTime();
                             setLeader(true, null);
                         } else {
                             currentLeaderRecordId = null;
@@ -348,16 +411,26 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                         }
                     }
                 } else {
-                    // Another instance holds leadership — check expiry against the DB clock.
+                    // Another instance holds leadership — check expiry and force-release deadline.
                     long timeout = getLeaderElectionConfiguration().getTimeout().toMillis();
                     long expiryThreshold = dbNow - timeout;
-                    if (currentLeader.getTimestamp() < expiryThreshold) {
-                        // Lease expired — atomically steal leadership via a single conditional UPDATE.
+                    boolean leaseExpired = currentLeader.getTimestamp() < expiryThreshold;
+                    long frd = currentLeader.getForceReleaseDeadline();
+                    boolean forceReleaseReady = frd != 0 && frd <= dbNow;
+
+                    if (leaseExpired || forceReleaseReady) {
+                        // Lease expired or force-release deadline elapsed — atomically steal leadership.
+                        // Re-check closing so a tick running through close() does not steal
+                        // leadership that was just released.
+                        if (closing.get()) {
+                            return;
+                        }
                         LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
-                        int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, newRecord);
+                        int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
                         if (result > 0) {
                             currentLeaderRecordId = newRecord.getId();
                             lastSuccessfulRenewalAt = System.currentTimeMillis();
+                            lastRenewalNanos = System.nanoTime();
                             setLeader(true, null);
                         } else {
                             setLeader(false, null);

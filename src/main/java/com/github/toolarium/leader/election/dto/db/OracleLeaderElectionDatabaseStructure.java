@@ -38,7 +38,18 @@ public class OracleLeaderElectionDatabaseStructure extends JDBCLeaderElectionDat
         }
         return "CREATE TABLE " + getTableName() + "(id VARCHAR2(36) NOT NULL, name VARCHAR2(512) NOT NULL, "
                 + "instance VARCHAR2(255), username VARCHAR2(255), lease_ts NUMBER(19) NOT NULL, "
+                + "force_release_deadline NUMBER(19) NULL, "
                 + "CONSTRAINT pk_" + suffix + " PRIMARY KEY (name))";
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLAddForceReleaseDeadlineColumn()
+     *     Oracle uses parentheses around the column definition in ADD and NUMBER(19) for 64-bit integers.
+     */
+    @Override
+    public String createSQLAddForceReleaseDeadlineColumn() {
+        return "ALTER TABLE " + getTableName() + " ADD (force_release_deadline NUMBER(19) NULL)";
     }
 
 

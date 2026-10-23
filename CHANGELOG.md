@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [ 1.2.2 ] - 2026-10-22
+## [ 1.2.2 ] - 2026-10-23
+### Added
+- **DATABASE**: `forceRelease()` on a remote leader now prevents any split-brain overlap. A force-release deadline is written to the shared table; the current holder steps down on its next tick and no other node can acquire leadership until the deadline elapses, ensuring a clean handover.
+- **DATABASE**: automatic schema migration adds the `force_release_deadline` column to existing installations on startup.
+
+### Fixed
+- **DATABASE**: leadership can no longer be held beyond the configured renew deadline when the scheduler thread is delayed or blocked.
+- **DATABASE**: `runIfLeader` tasks are interrupted reliably when leadership is lost, with no spurious interrupt leaks to the calling thread.
+- **ALL**: `ILeaderLease.isValid()` correctly returns `false` for leases from a previous leadership term after a lose-and-regain cycle.
 
 ## [ 1.2.1 ] - 2026-10-22
 ### Added

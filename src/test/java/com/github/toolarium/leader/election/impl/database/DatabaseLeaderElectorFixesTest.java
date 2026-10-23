@@ -55,46 +55,47 @@ public class DatabaseLeaderElectorFixesTest {
 
 
     // -----------------------------------------------------------------------
-    // Issue #1a: query timeout is computed from the retryPeriod.
+    // Issue #1a / Issue #3: query timeout bounds the whole tick to renewDeadline.
+    // Each tick runs up to 3 sequential statements; timeout = ceil(renewDeadline/3/1000)
+    // so the worst-case tick duration stays within renewDeadline.
     // -----------------------------------------------------------------------
 
     /**
      * Verify that the query timeout stored in {@link LeaderElectionDAO} equals
-     * {@code ceil(retryPeriodMillis / 1000)}.
-     * A missing or oversized timeout would let a hanging DB call block the election thread
-     * for longer than the renew deadline, allowing another node to steal leadership while
-     * the original leader still considers itself active.
+     * {@code ceil(renewDeadlineMillis / 3 / 1000)}.
+     * This bounds the whole election tick (up to 3 statements) to at most renewDeadline,
+     * preventing a split-brain window where a slow DB lets a tick outlast the lease.
      *
      * @throws Exception in case of an error
      */
     @Test
     public void testQueryTimeoutMatchesRetryPeriod() throws Exception {
-        assertQueryTimeout(Duration.ofMillis(500), 1);   // ceil(0.5)  = 1
-        assertQueryTimeout(Duration.ofMillis(2000), 2);  // ceil(2.0)  = 2
-        assertQueryTimeout(Duration.ofMillis(2500), 3);  // ceil(2.5)  = 3
+        assertQueryTimeout(Duration.ofMillis(1500), 1);  // ceil(1500/3/1000) = ceil(0.5) = 1
+        assertQueryTimeout(Duration.ofMillis(6000), 2);  // ceil(6000/3/1000) = ceil(2.0) = 2
+        assertQueryTimeout(Duration.ofMillis(7500), 3);  // ceil(7500/3/1000) = ceil(2.5) = 3
     }
 
     /**
-     * Assert the query timeout for a given retry period.
+     * Assert the query timeout for a given renew deadline.
      *
-     * @param retryPeriod the retry period
+     * @param renewDeadline the renew deadline
      * @param expectedSeconds the expected query timeout in seconds
      * @throws Exception in case of an error
      */
-    private void assertQueryTimeout(Duration retryPeriod, int expectedSeconds) throws Exception {
+    private void assertQueryTimeout(Duration renewDeadline, int expectedSeconds) throws Exception {
         JdbcDataSource ds = new JdbcDataSource();
         ds.setURL("jdbc:h2:mem:qtimeout_test;DB_CLOSE_DELAY=-1");
         ds.setUser(DB_USER);
         ds.setPassword("");
         DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(
-                Duration.ofSeconds(10), Duration.ofSeconds(5), retryPeriod);
+                renewDeadline.multipliedBy(2), renewDeadline, renewDeadline.dividedBy(2));
         config.setDataSource(ds);
 
         LeaderElectionDAO dao = new LeaderElectionDAO(config);
         Field f = LeaderElectionDAO.class.getDeclaredField("queryTimeoutSeconds");
         f.setAccessible(true);
         assertEquals(expectedSeconds, (int) f.get(dao),
-                "queryTimeoutSeconds must equal ceil(retryPeriodMillis/1000) for retryPeriod=" + retryPeriod);
+                "queryTimeoutSeconds must equal ceil(renewDeadlineMillis/3/1000) for renewDeadline=" + renewDeadline);
     }
 
 

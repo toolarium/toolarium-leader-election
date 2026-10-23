@@ -30,6 +30,7 @@ public class MySQLLeaderElectionDatabaseStructure extends JDBCLeaderElectionData
     public String createSQLTable() {
         return "CREATE TABLE " + getTableName() + "(id varchar(36) NOT NULL, name varchar(512) NOT NULL, "
                 + "instance varchar(255), username varchar(255), lease_ts bigint NOT NULL, "
+                + "force_release_deadline bigint NULL, "
                 + "CONSTRAINT pk_" + getTableName().toLowerCase() + " PRIMARY KEY (name)) ROW_FORMAT=DYNAMIC";
     }
 

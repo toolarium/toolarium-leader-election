@@ -30,12 +30,11 @@ final class LeaderLeaseMonitor {
 
 
     /**
-     * Monitor the lease of a running task.
-     *
-     * @param lease the lease
+     * Start the monitor thread. Called once when the elector is initialized.
+     * Keeping the thread alive for the elector's lifetime avoids per-task
+     * create/destroy churn for sequential {@code runIfLeader} calls.
      */
-    synchronized void register(DefaultLeaderLease lease) {
-        leases.add(lease);
+    synchronized void start() {
         if (executorService == null) {
             executorService = Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "leader-lease-monitor");
@@ -44,6 +43,27 @@ final class LeaderLeaseMonitor {
             });
             executorService.scheduleWithFixedDelay(this::check, CHECK_PERIOD_MILLIS, CHECK_PERIOD_MILLIS, TimeUnit.MILLISECONDS);
         }
+    }
+
+
+    /**
+     * Stop the monitor thread. Called when the elector is closed.
+     */
+    synchronized void stop() {
+        if (executorService != null) {
+            executorService.shutdown();
+            executorService = null;
+        }
+    }
+
+
+    /**
+     * Monitor the lease of a running task.
+     *
+     * @param lease the lease
+     */
+    void register(DefaultLeaderLease lease) {
+        leases.add(lease);
     }
 
 
@@ -58,7 +78,7 @@ final class LeaderLeaseMonitor {
 
 
     /**
-     * Interrupt the tasks which lost the lead, stop the thread if no task runs.
+     * Interrupt tasks that have lost the lead.
      */
     private void check() {
         try {
@@ -72,13 +92,6 @@ final class LeaderLeaseMonitor {
                 LOG.debug("Could not check the leader leases: " + e.getMessage(), e);
             }
             LOG.warn("Could not check the leader leases: {}", e.getMessage());
-        }
-
-        synchronized (this) {
-            if (leases.isEmpty() && executorService != null) {
-                executorService.shutdown();
-                executorService = null;
-            }
         }
     }
 }

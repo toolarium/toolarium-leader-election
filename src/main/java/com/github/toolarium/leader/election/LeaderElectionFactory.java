@@ -72,6 +72,11 @@ public final class LeaderElectionFactory {
      *     admin.forceRelease("some-id");
      * </pre>
      *
+     * <p><b>Access control:</b> the returned singleton is shared across the entire JVM.
+     * Callers should gate access behind appropriate application-level authorization
+     * (e.g. a secured management or actuator endpoint) to prevent unintended
+     * force-release of electors owned by other subsystems.
+     *
      * @return the singleton {@link ILeaderElectionAdministration}; never {@code null}
      */
     public ILeaderElectionAdministration getLeaderElectionAdministration() {

@@ -29,7 +29,18 @@ public class SQLServerLeaderElectionDatabaseStructure extends JDBCLeaderElection
     public String createSQLTable() {
         return "CREATE TABLE " + getTableName() + "(id NVARCHAR(36) NOT NULL, name NVARCHAR(512) NOT NULL, "
                 + "instance NVARCHAR(255), username NVARCHAR(255), lease_ts BIGINT NOT NULL, "
+                + "force_release_deadline BIGINT NULL, "
                 + "CONSTRAINT pk_" + getTableName().toLowerCase() + " PRIMARY KEY (name))";
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLAddForceReleaseDeadlineColumn()
+     *     SQL Server uses ADD without the COLUMN keyword.
+     */
+    @Override
+    public String createSQLAddForceReleaseDeadlineColumn() {
+        return "ALTER TABLE " + getTableName() + " ADD force_release_deadline BIGINT NULL";
     }
 
 
