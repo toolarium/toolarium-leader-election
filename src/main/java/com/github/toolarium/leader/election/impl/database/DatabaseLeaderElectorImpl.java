@@ -74,6 +74,14 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private volatile long lastClockSyncAt;
     // AtomicBoolean so close() is idempotent under concurrent calls (e.g. app shutdown + JVM hook).
     private final AtomicBoolean closing;
+    // Monotonically increasing session counter. Incremented by close() so that a
+    // DatabaseElectionHandler from the previous session (still blocked in a DB call) can
+    // detect the session change and discard its result without touching the new session's state.
+    private volatile int sessionCounter;
+    // Set to true once leaderElectionDAO.init() succeeds; guards the DELETE in close() so that
+    // electors whose elect() was never called (or whose init failed, e.g. allowDdl=false with a
+    // missing table) do not emit a noisy INFO log when close() finds no table to delete from.
+    private volatile boolean daoReady;
 
 
     /**
@@ -94,6 +102,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         this.dbClockOffsetMillis = 0;
         this.lastClockSyncAt = 0;
         this.closing = new AtomicBoolean(false);
+        this.sessionCounter = 0;
+        this.daoReady = false;
     }
 
 
@@ -104,6 +114,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     protected void initializeImplementation() throws LeaderElectionException {
         // Allow reuse after close().
         closing.set(false);
+        daoReady = false;              // reset until init() succeeds below
         lastClockSyncAt = 0;           // force a fresh DB clock sync on (re-)initialization
         lastRenewalNanos = NANOS_NOT_SET; // reset nanoTime sentinel so step-down guards are fresh
         backoffUntil = NANOS_NOT_SET;  // reset backoff on re-initialization
@@ -115,6 +126,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
         try {
             leaderElectionDAO.init();
+            daoReady = true;
         } catch (SQLException e) {
             throw new LeaderElectionException("Could not prepare database for leader election: " + e.getMessage(), e);
         }
@@ -198,6 +210,11 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             return;
         }
 
+        // Invalidate all DatabaseElectionHandler instances from this session so that any
+        // round still blocked in a DB call after awaitTermination() returns will discard its
+        // result and not write state to a future session started by elect() after this close().
+        sessionCounter++;
+
         // Capture wasLeader before signalLeaderInvalid() nulls the field so that
         // closeInternal() can still log "Released lead" correctly.
         boolean wasLeader = super.isLeader();
@@ -244,21 +261,25 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         try {
             super.closeInternal(wasLeader, Math.max(0L, remainingForSuper));
         } finally {
-            // Always attempt to delete the own leader record so another node can take over
-            // immediately. The DELETE targets this node's instance column and is a no-op when
-            // the row does not exist or belongs to another node. We do NOT guard on
-            // currentLeaderRecordId: a tick running concurrently during close() may have
-            // renewed the row while also setting currentLeaderRecordId=null (closing branch),
-            // leaving the row in the table even though this elector is no longer active.
-            try {
-                leaderElectionDAO.deleteLeaderByNameAndInstance(getLeaderElectionInformation().getElectionGroupName(), getId());
-            } catch (Exception e) {
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug("Error detail:", e);
+            // Attempt to delete the own leader record so another node can take over immediately.
+            // The DELETE targets this node's instance column and is a no-op when the row does
+            // not exist or belongs to another node. We do NOT guard on currentLeaderRecordId:
+            // a tick running concurrently during close() may have renewed the row while also
+            // setting currentLeaderRecordId=null (closing branch), leaving the row in the
+            // table even though this elector is no longer active.
+            // Guard on daoReady: if elect() was never called or init() failed (e.g. allowDdl=false
+            // with a missing table), skip the DELETE silently — there is no row to delete.
+            if (daoReady) {
+                try {
+                    leaderElectionDAO.deleteLeaderByNameAndInstance(getLeaderElectionInformation().getElectionGroupName(), getId());
+                } catch (Exception e) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Error detail:", e);
+                    }
+                    LOG.info("Could not delete leader record on close for [{}]: {}, the row will expire after the configured timeout. "
+                            + "To avoid this delay call close() before the DataSource is destroyed (e.g. @PreDestroy).",
+                            getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
                 }
-                LOG.info("Could not delete leader record on close for [{}]: {}, the row will expire after the configured timeout. "
-                        + "To avoid this delay call close() before the DataSource is destroyed (e.g. @PreDestroy).",
-                        getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
             }
             currentLeaderRecordId = null;
 
@@ -554,10 +575,20 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * @author patrick
      */
     protected class DatabaseElectionHandler implements Runnable {
+        // Capture the session at construction so that a handler from a previous session
+        // (still blocked in a DB call when close() + elect() cycle runs) can detect the
+        // session change and discard its result.
+        private final int mySession = sessionCounter;
+
+
         /**
          * @see java.lang.Runnable#run()
          */
         public void run() {
+            // Discard ticks that belong to a closed session: close() increments sessionCounter.
+            if (mySession != sessionCounter) {
+                return;
+            }
             // Do not execute any more ticks after close() has been called.
             if (closing.get()) {
                 return;
@@ -637,6 +668,17 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 backoffUntil = NANOS_NOT_SET;
             } catch (Throwable e) {
                 handleTickError(e, uniqueName);
+            } finally {
+                // If close() is in progress or has already returned, ensure any row written
+                // by this tick (e.g. insert or steal that was blocked past close()'s delete)
+                // is cleaned up so other nodes are not delayed by the full timeout.
+                if (closing.get()) {
+                    try {
+                        leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
+                    } catch (Exception ex) {
+                        // best-effort; the row will expire after timeout
+                    }
+                }
             }
         }
     }
