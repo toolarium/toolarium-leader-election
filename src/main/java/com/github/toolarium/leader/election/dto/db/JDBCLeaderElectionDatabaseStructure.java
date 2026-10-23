@@ -131,7 +131,7 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
      */
     @Override
     public String createSQLSetForceReleaseDeadline() {
-        return "UPDATE " + getTableName() + " SET force_release_deadline = ? WHERE instance = ?";
+        return "UPDATE " + getTableName() + " SET force_release_deadline = ? WHERE instance = ? AND force_release_deadline IS NULL";
     }
 
 

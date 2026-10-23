@@ -72,6 +72,7 @@ public class DatabaseStructureTest {
         assertNotNull(s.createSQLSetForceReleaseDeadline());
         assertTrue(s.createSQLSetForceReleaseDeadline().contains(DEFAULT_TABLE));
         assertTrue(s.createSQLSetForceReleaseDeadline().contains(FORCE_RELEASE_DEADLINE_COL));
+        assertTrue(s.createSQLSetForceReleaseDeadline().contains("force_release_deadline IS NULL"));
         assertTrue(s.createSQLSetForceReleaseDeadline().endsWith(SEMICOLON));
         assertNotNull(s.createSQLAddForceReleaseDeadlineColumn());
         assertTrue(s.createSQLAddForceReleaseDeadlineColumn().contains(DEFAULT_TABLE));
@@ -127,6 +128,7 @@ public class DatabaseStructureTest {
         assertTrue(!s.createSQLStealLeadership().endsWith(SEMICOLON));
         assertNotNull(s.createSQLSetForceReleaseDeadline());
         assertTrue(s.createSQLSetForceReleaseDeadline().contains(FORCE_RELEASE_DEADLINE_COL));
+        assertTrue(s.createSQLSetForceReleaseDeadline().contains("force_release_deadline IS NULL"));
         assertTrue(!s.createSQLSetForceReleaseDeadline().endsWith(SEMICOLON));
         assertNotNull(s.createSQLAddForceReleaseDeadlineColumn());
         assertTrue(s.createSQLAddForceReleaseDeadlineColumn().contains(DEFAULT_TABLE));

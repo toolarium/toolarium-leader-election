@@ -141,13 +141,14 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         String uniqueName = getLeaderElectionInformation().getElectionGroupName();
         String instanceId = getId();
         try {
+            long extendStartNanos = System.nanoTime();
             long dbNow = getDbNow();
             LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
             int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
             if (result > 0) {
                 currentLeaderRecordId = newRecord.getId();
                 lastSuccessfulRenewalAt = System.currentTimeMillis();
-                lastRenewalNanos = System.nanoTime();
+                lastRenewalNanos = extendStartNanos;
                 setLeader(true, null);
                 return true;
             } else {
@@ -305,191 +306,145 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
 
     /**
-     * The database leader election handler
+     * Pre-tick renew-deadline guard: called BEFORE any DB operation so a hanging or
+     * unavailable database cannot keep this node as leader indefinitely.
+     * Uses {@code super.isLeader()} (the stored flag from {@code AbstractLeaderElectorImpl})
+     * rather than the overridden {@link #isLeader()} so the check fires even when the
+     * nanoTime-based expiry already returned {@code false} on the previous call.
      *
-     * @author patrick
+     * @param uniqueName the election group name
+     * @param instanceId this node's instance identifier
+     * @return {@code true} if the caller should return immediately (leadership was relinquished)
      */
-    protected class DatabaseElectionHandler implements Runnable {
-        /**
-         * @see java.lang.Runnable#run()
-         */
-        public void run() {
-            // Do not execute any more ticks after close() has been called.
-            if (closing.get()) {
-                return;
-            }
-            // Exponential back-off: skip this tick if we are still within the back-off window.
-            if (System.currentTimeMillis() < backoffUntil) {
-                return;
-            }
-
-            String uniqueName = getLeaderElectionInformation().getElectionGroupName();
-            String instanceId = getId();
-
-            // Pre-tick renew-deadline guard: check BEFORE any DB call so a hanging or
-            // slow database cannot keep this node as leader indefinitely (e.g. GC pause,
-            // thread starvation, or a network partition with a previously-open connection).
-            // The query timeout in LeaderElectionDAO handles the "DB call hangs" case by
-            // converting the hang into an exception; this guard handles the "scheduler thread
-            // was not scheduled" case.
-            if (isLeader() && lastSuccessfulRenewalAt > 0) {
-                long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
-                if (System.currentTimeMillis() - lastSuccessfulRenewalAt > renewDeadlineMillis) {
-                    LOG.info("Renew deadline exceeded (pre-tick) for [{}], stepping down as leader.", uniqueName);
-                    currentLeaderRecordId = null;
-                    setLeader(false, null);
-                    // Delete our DB row immediately so another node can take over without
-                    // waiting for the full timeout to elapse.
-                    try {
-                        leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
-                    } catch (Exception del) {
-                        LOG.warn("Could not delete leader record during voluntary step-down for [{}]: {}", uniqueName, del.getMessage());
-                    }
-                    return;
+    private boolean checkPreTickRenewDeadline(String uniqueName, String instanceId) {
+        if (super.isLeader() && lastSuccessfulRenewalAt > 0) {
+            long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
+            if (System.currentTimeMillis() - lastSuccessfulRenewalAt > renewDeadlineMillis) {
+                LOG.info("Renew deadline exceeded (pre-tick) for [{}], stepping down as leader.", uniqueName);
+                currentLeaderRecordId = null;
+                setLeader(false, null);
+                try {
+                    leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
+                } catch (Exception del) {
+                    LOG.warn("Could not delete leader record during voluntary step-down for [{}]: {}", uniqueName, del.getMessage());
                 }
-            }
-
-            try {
-                // Obtain a DB-clock-anchored timestamp (cached offset, refreshed every
-                // CLOCK_SYNC_TICKS ticks) so all writes and expiry checks use the same
-                // reference point without an extra DB round-trip on most ticks.
-                long dbNow = getDbNow();
-                LeaderElectorRecord currentLeader = leaderElectionDAO.selectLeaderByName(uniqueName);
-
-                if (currentLeader == null) {
-                    // No leader exists — try to become one.
-                    // Re-check closing AFTER the SELECT so a tick that was already running when
-                    // close() fired cannot re-insert the row that close() just deleted.
-                    if (closing.get()) {
-                        return;
-                    }
-                    LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
-                    int result = leaderElectionDAO.insertLeader(newRecord);
-                    if (result > 0) {
-                        currentLeaderRecordId = newRecord.getId();
-                        lastSuccessfulRenewalAt = System.currentTimeMillis();
-                        lastRenewalNanos = System.nanoTime();
-                        setLeader(true, null);
-                    } else {
-                        setLeader(false, null);
-                    }
-                } else if (instanceId.equals(currentLeader.getInstance())) {
-                    long frd = currentLeader.getForceReleaseDeadline();
-                    if (!isLeader()) {
-                        // We hold the DB row but have already stepped down locally (renew deadline exceeded
-                        // or force-release processed on a previous tick).
-                        if (frd != 0 && frd > dbNow) {
-                            // Force-release deadline still in the future — keep the row as a guard so no
-                            // other node can acquire before the deadline elapses. Nothing to do this tick.
-                        } else {
-                            // Normal pre-tick step-down or deadline has passed: delete the row so another
-                            // node can take over immediately.
-                            leaderElectionDAO.deleteLeaderByNameAndInstance(uniqueName, instanceId);
-                            currentLeaderRecordId = null;
-                        }
-                    } else if (frd != 0) {
-                        // Admin requested force-release — step down without renewing.
-                        // Do NOT delete the row: the deadline guards new acquisitions until frd elapses,
-                        // preventing a split-brain between our (soon-to-expire) lease and the new leader.
-                        LOG.info("Force-release deadline detected for [{}], stepping down as leader.", uniqueName);
-                        currentLeaderRecordId = null;
-                        setLeader(false, null);
-                    } else {
-                        // We are the leader — atomically renew the lease using the DB clock.
-                        // The UPDATE condition also checks force_release_deadline IS NULL so a concurrent
-                        // forceRelease that set the deadline between our SELECT and UPDATE cannot be bypassed.
-                        LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
-                        int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
-                        if (result > 0) {
-                            currentLeaderRecordId = newRecord.getId();
-                            lastSuccessfulRenewalAt = System.currentTimeMillis();
-                            lastRenewalNanos = System.nanoTime();
-                            setLeader(true, null);
-                        } else {
-                            currentLeaderRecordId = null;
-                            setLeader(false, null);
-                        }
-                    }
-                } else {
-                    // Another instance holds leadership — check expiry and force-release deadline.
-                    long timeout = getLeaderElectionConfiguration().getTimeout().toMillis();
-                    long expiryThreshold = dbNow - timeout;
-                    boolean leaseExpired = currentLeader.getTimestamp() < expiryThreshold;
-                    long frd = currentLeader.getForceReleaseDeadline();
-                    boolean forceReleaseReady = frd != 0 && frd <= dbNow;
-
-                    if (leaseExpired || forceReleaseReady) {
-                        // Lease expired or force-release deadline elapsed — atomically steal leadership.
-                        // Re-check closing so a tick running through close() does not steal
-                        // leadership that was just released.
-                        if (closing.get()) {
-                            return;
-                        }
-                        LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
-                        int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
-                        if (result > 0) {
-                            currentLeaderRecordId = newRecord.getId();
-                            lastSuccessfulRenewalAt = System.currentTimeMillis();
-                            lastRenewalNanos = System.nanoTime();
-                            setLeader(true, null);
-                        } else {
-                            setLeader(false, null);
-                        }
-                    } else {
-                        setLeader(false, null);
-                    }
-                }
-                consecutiveFailures = 0;
-                backoffUntil = 0;
-            } catch (Throwable e) {
-                consecutiveFailures++;
-                if (e instanceof Error) {
-                    LOG.error("Fatal error in election tick for [{}]: {}", uniqueName, e.getMessage());
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug("Error detail:", e);
-                    }
-                } else if (consecutiveFailures >= CONSECUTIVE_FAILURE_THRESHOLD) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug("Error detail:", e);
-                    }
-                    LOG.error("Repeated failure ({}) verifying database cluster [{}]: {}", consecutiveFailures, uniqueName, e.getMessage());
-                } else {
-                    LOG.warn("Error occurred while verifying database cluster [{}]: {}", uniqueName, e.getMessage());
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug("Error detail:", e);
-                    }
-                }
-
-                // If we hold leadership but haven't successfully renewed within the renew deadline,
-                // voluntarily step down so another node can take over before the full timeout elapses.
-                long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
-                if (isLeader() && lastSuccessfulRenewalAt > 0
-                        && System.currentTimeMillis() - lastSuccessfulRenewalAt > renewDeadlineMillis) {
-                    LOG.info("Renew deadline exceeded for [{}], stepping down as leader.", uniqueName);
-                    currentLeaderRecordId = null;
-                    setLeader(false, null);
-                }
-
-                // Ensure elect() can return even when the very first round fails with a DB error.
-                // Without this, the CountDownLatch never reaches zero and elect() blocks forever.
-                if (!hasElectionResult()) {
-                    setLeader(false, null);
-                }
-
-                // Cap the backoff so it never pushes the next attempt past the renew deadline.
-                long retryPeriod = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
-                long exp = (long) Math.pow(2, Math.min(consecutiveFailures - 1, 5));
-                long backoffDelay = Math.min(retryPeriod * exp, MAX_BACKOFF_MILLIS);
-                long candidate = System.currentTimeMillis() + backoffDelay;
-                long renewDeadlineCap;
-                if (lastSuccessfulRenewalAt > 0) {
-                    renewDeadlineCap = lastSuccessfulRenewalAt + renewDeadlineMillis;
-                } else {
-                    renewDeadlineCap = Long.MAX_VALUE;
-                }
-                backoffUntil = Math.min(candidate, renewDeadlineCap);
+                return true;
             }
         }
+        return false;
+    }
+
+
+    /**
+     * Handles the election tick when this instance currently holds the DB leader row.
+     * Decides whether to keep, renew, or relinquish leadership based on the force-release
+     * deadline and the nanoTime-based {@link #isLeader()} check.
+     *
+     * @param roundStartNanos nanoTime captured at the very start of the tick (before getDbNow)
+     * @param dbNow           current DB-clock epoch milliseconds
+     * @param uniqueName      the election group name
+     * @param instanceId      this node's instance identifier
+     * @param frd             the {@code force_release_deadline} value from the DB row (0 = not set)
+     * @throws Exception on DB access errors
+     */
+    private void handleOwnLeaderTick(long roundStartNanos, long dbNow, String uniqueName, String instanceId, long frd) throws Exception {
+        if (!isLeader()) {
+            // We hold the DB row but have already stepped down locally (renewDeadline exceeded or
+            // force-release processed on a previous tick). Ensure the stored flag is false so the
+            // term is incremented on the next acquisition.
+            setLeader(false, null);
+            if (frd != 0 && frd > dbNow) {
+                // Force-release deadline still in the future — keep the row as a guard so no
+                // other node can acquire before the deadline elapses. Nothing to do this tick.
+            } else {
+                // Time-based step-down: the local lease expired (renewDeadline exceeded).
+                // Do NOT delete the row — let it age out naturally so a new node steals it only
+                // after the full timeout, giving any in-flight runIfLeader task the complete
+                // (timeout - renewDeadline) window to notice and stop.
+                currentLeaderRecordId = null;
+            }
+        } else if (frd != 0) {
+            // Admin requested force-release — step down without renewing.
+            // Do NOT delete the row: the deadline guards new acquisitions until frd elapses,
+            // preventing a split-brain between our (soon-to-expire) lease and the new leader.
+            LOG.info("Force-release deadline detected for [{}], stepping down as leader.", uniqueName);
+            currentLeaderRecordId = null;
+            setLeader(false, null);
+        } else {
+            // We are the leader — atomically renew the lease using the DB clock.
+            // The UPDATE condition checks force_release_deadline IS NULL so a concurrent
+            // forceRelease that set the deadline between our SELECT and UPDATE cannot be bypassed.
+            LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
+            int result = leaderElectionDAO.updateLeaderTimestamp(uniqueName, instanceId, newRecord.getId(), newRecord.getTimestamp());
+            if (result > 0) {
+                currentLeaderRecordId = newRecord.getId();
+                lastSuccessfulRenewalAt = System.currentTimeMillis();
+                lastRenewalNanos = roundStartNanos;
+                setLeader(true, null);
+            } else {
+                currentLeaderRecordId = null;
+                setLeader(false, null);
+            }
+        }
+    }
+
+
+    /**
+     * Handles a {@link Throwable} thrown during an election tick: logs, applies the
+     * catch-block step-down check using {@code super.isLeader()} (stored flag), ensures
+     * {@code elect()} can unblock on first-round DB failure, and schedules back-off.
+     *
+     * @param e          the throwable
+     * @param uniqueName the election group name
+     */
+    private void handleTickError(Throwable e, String uniqueName) {
+        consecutiveFailures++;
+        if (e instanceof Error) {
+            LOG.error("Fatal error in election tick for [{}]: {}", uniqueName, e.getMessage());
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Error detail:", e);
+            }
+        } else if (consecutiveFailures >= CONSECUTIVE_FAILURE_THRESHOLD) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Error detail:", e);
+            }
+            LOG.error("Repeated failure ({}) verifying database cluster [{}]: {}", consecutiveFailures, uniqueName, e.getMessage());
+        } else {
+            LOG.warn("Error occurred while verifying database cluster [{}]: {}", uniqueName, e.getMessage());
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Error detail:", e);
+            }
+        }
+
+        // If we hold leadership but haven't successfully renewed within the renew deadline,
+        // voluntarily step down so another node can take over before the full timeout elapses.
+        // Uses super.isLeader() (stored flag) — not the overridden isLeader() — for the same
+        // reason as checkPreTickRenewDeadline: the nanoTime check may already be false.
+        long renewDeadlineMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
+        if (super.isLeader() && lastSuccessfulRenewalAt > 0
+                && System.currentTimeMillis() - lastSuccessfulRenewalAt > renewDeadlineMillis) {
+            LOG.info("Renew deadline exceeded for [{}], stepping down as leader.", uniqueName);
+            currentLeaderRecordId = null;
+            setLeader(false, null);
+        }
+
+        // Ensure elect() can return even when the very first round fails with a DB error.
+        if (!hasElectionResult()) {
+            setLeader(false, null);
+        }
+
+        // Cap the backoff so it never pushes the next attempt past the renew deadline.
+        long retryPeriod = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
+        long exp = (long) Math.pow(2, Math.min(consecutiveFailures - 1, 5));
+        long backoffDelay = Math.min(retryPeriod * exp, MAX_BACKOFF_MILLIS);
+        long candidate = System.currentTimeMillis() + backoffDelay;
+        long renewDeadlineCap;
+        if (lastSuccessfulRenewalAt > 0) {
+            renewDeadlineCap = lastSuccessfulRenewalAt + renewDeadlineMillis;
+        } else {
+            renewDeadlineCap = Long.MAX_VALUE;
+        }
+        backoffUntil = Math.min(candidate, renewDeadlineCap);
     }
 
 
@@ -528,6 +483,101 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             }
         }
         return now + dbClockOffsetMillis;
+    }
+
+
+    /**
+     * The database leader election handler
+     *
+     * @author patrick
+     */
+    protected class DatabaseElectionHandler implements Runnable {
+        /**
+         * @see java.lang.Runnable#run()
+         */
+        public void run() {
+            // Do not execute any more ticks after close() has been called.
+            if (closing.get()) {
+                return;
+            }
+            // Exponential back-off: skip this tick if we are still within the back-off window.
+            if (System.currentTimeMillis() < backoffUntil) {
+                return;
+            }
+
+            String uniqueName = getLeaderElectionInformation().getElectionGroupName();
+            String instanceId = getId();
+
+            // Pre-tick renew-deadline guard: checked BEFORE any DB call via checkPreTickRenewDeadline().
+            // super.isLeader() (stored flag) is used there — not the overridden isLeader() — so the
+            // guard fires even when the nanoTime expiry already returned false on the previous call.
+            if (checkPreTickRenewDeadline(uniqueName, instanceId)) {
+                return;
+            }
+
+            try {
+                // Capture local nanoTime at the very start of the round so that lastRenewalNanos is never set to a time
+                // AFTER the DB write; using nanoTime() after the DB call would extend the local lease by the round-trip
+                // duration, potentially creating a split-brain window.
+                long roundStartNanos = System.nanoTime();
+                // Obtain a DB-clock-anchored timestamp (cached offset, refreshed every CLOCK_SYNC_TICKS ticks) so all
+                // writes and expiry checks use the same reference point without an extra DB round-trip on most ticks.
+                long dbNow = getDbNow();
+                LeaderElectorRecord currentLeader = leaderElectionDAO.selectLeaderByName(uniqueName);
+
+                if (currentLeader == null) {
+                    // No leader exists — try to become one. Re-check closing AFTER the SELECT so a tick that was already
+                    // running when close() fired cannot re-insert the row that close() just deleted.
+                    if (closing.get()) {
+                        return;
+                    }
+                    LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
+                    int result = leaderElectionDAO.insertLeader(newRecord);
+                    if (result > 0) {
+                        currentLeaderRecordId = newRecord.getId();
+                        lastSuccessfulRenewalAt = System.currentTimeMillis();
+                        lastRenewalNanos = roundStartNanos;
+                        setLeader(true, null);
+                    } else {
+                        setLeader(false, null);
+                    }
+                } else if (instanceId.equals(currentLeader.getInstance())) {
+                    handleOwnLeaderTick(roundStartNanos, dbNow, uniqueName, instanceId, currentLeader.getForceReleaseDeadline());
+                } else {
+                    // Another instance holds leadership — check expiry and force-release deadline.
+                    long timeout = getLeaderElectionConfiguration().getTimeout().toMillis();
+                    long expiryThreshold = dbNow - timeout;
+                    boolean leaseExpired = currentLeader.getTimestamp() < expiryThreshold;
+                    long frd = currentLeader.getForceReleaseDeadline();
+                    boolean forceReleaseReady = frd != 0 && frd <= dbNow;
+
+                    if (leaseExpired || forceReleaseReady) {
+                        // Lease expired or force-release deadline elapsed — atomically steal leadership.
+                        // Re-check closing so a tick running through close() does not steal
+                        // leadership that was just released.
+                        if (closing.get()) {
+                            return;
+                        }
+                        LeaderElectorRecord newRecord = new LeaderElectorRecord(uniqueName, instanceId, getLeaderElectionInformation().getUsername(), dbNow);
+                        int result = leaderElectionDAO.stealLeadership(uniqueName, currentLeader.getId(), expiryThreshold, dbNow, newRecord);
+                        if (result > 0) {
+                            currentLeaderRecordId = newRecord.getId();
+                            lastSuccessfulRenewalAt = System.currentTimeMillis();
+                            lastRenewalNanos = System.nanoTime();
+                            setLeader(true, null);
+                        } else {
+                            setLeader(false, null);
+                        }
+                    } else {
+                        setLeader(false, null);
+                    }
+                }
+                consecutiveFailures = 0;
+                backoffUntil = 0;
+            } catch (Throwable e) {
+                handleTickError(e, uniqueName);
+            }
+        }
     }
 
 

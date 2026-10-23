@@ -62,17 +62,17 @@ public class DatabaseLeaderElectorFixesTest {
 
     /**
      * Verify that the query timeout stored in {@link LeaderElectionDAO} equals
-     * {@code ceil(renewDeadlineMillis / 3 / 1000)}.
-     * This bounds the whole election tick (up to 3 statements) to at most renewDeadline,
+     * {@code floor(renewDeadlineMillis / 3 / 1000)}, clamped to 1.
+     * Using floor ensures 3 × queryTimeout never exceeds renewDeadline,
      * preventing a split-brain window where a slow DB lets a tick outlast the lease.
      *
      * @throws Exception in case of an error
      */
     @Test
     public void testQueryTimeoutMatchesRetryPeriod() throws Exception {
-        assertQueryTimeout(Duration.ofMillis(1500), 1);  // ceil(1500/3/1000) = ceil(0.5) = 1
-        assertQueryTimeout(Duration.ofMillis(6000), 2);  // ceil(6000/3/1000) = ceil(2.0) = 2
-        assertQueryTimeout(Duration.ofMillis(7500), 3);  // ceil(7500/3/1000) = ceil(2.5) = 3
+        assertQueryTimeout(Duration.ofMillis(1500), 1);  // floor(1500/3/1000) = floor(0.5) = 0 → clamped to 1
+        assertQueryTimeout(Duration.ofMillis(6000), 2);  // floor(6000/3/1000) = floor(2.0) = 2
+        assertQueryTimeout(Duration.ofMillis(7500), 2);  // floor(7500/3/1000) = floor(2.5) = 2
     }
 
     /**

@@ -55,7 +55,7 @@ public class LeaderElectionDAO {
         // within renewDeadline. Using retryPeriod alone allowed 3 * retryPeriod per tick,
         // which could exceed renewDeadline and create a split-brain window.
         long renewMillis = leaderElectionConfiguration.getRenewDeadline().toMillis();
-        this.queryTimeoutSeconds = Math.max(1, (int) ((renewMillis / 3 + 999) / 1000));
+        this.queryTimeoutSeconds = Math.max(1, (int) (renewMillis / 3 / 1000));
     }
 
 

@@ -114,7 +114,7 @@ final class DefaultLeaderLease implements ILeaderLease {
      * Subsequent calls from the {@link LeaderLeaseMonitor} (every 100 ms) are ignored
      * after the first interrupt has been sent, preventing repeated interrupts during cleanup.
      */
-    void interruptIfRunning() {
+    synchronized void interruptIfRunning() {
         if (interruptedByMonitor.compareAndSet(false, true) && taskThread.isAlive()) {
             taskThread.interrupt();
         }

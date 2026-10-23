@@ -8,7 +8,6 @@ package com.github.toolarium.leader.election.impl.database;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.toolarium.leader.election.ILeaderElector;
@@ -223,8 +222,17 @@ public class DatabaseElectorViewsTest {
                     "Manually inserted record must be visible before forceReleaseRemote");
             assertTrue(dbElector.forceReleaseRemote(remoteId),
                     "forceReleaseRemote must return true for a known instance id");
-            assertNull(findById(dbElector.getDatabaseElectorViews(), remoteId),
-                    "Record must be gone from getDatabaseElectorViews() after forceReleaseRemote");
+            // Row is NOT deleted — force_release_deadline is set to prevent split-brain.
+            // The row stays as a guard until the deadline elapses and a new node steals it.
+            assertNotNull(findById(dbElector.getDatabaseElectorViews(), remoteId),
+                    "Record still present after forceReleaseRemote (deadline set, row not deleted)");
+            // Verify the deadline is persisted in the database
+            String selectSql = "SELECT force_release_deadline FROM LeaderElection WHERE instance = '" + remoteId + "'";
+            try (Connection conn = ds.getConnection(); Statement chkStmt = conn.createStatement();
+                 java.sql.ResultSet rs = chkStmt.executeQuery(selectSql)) {
+                assertTrue(rs.next(), "Row must still exist");
+                assertTrue(rs.getLong(1) > 0, "force_release_deadline must be set to a future epoch millis");
+            }
         } finally {
             elector.close();
         }

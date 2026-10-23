@@ -183,8 +183,17 @@ public class LeaderElectionAdministrationTest {
                     "Remote DB record must appear in getElectors() before force-release");
             assertTrue(admin.forceRelease(remoteId),
                     "forceRelease must return true for a known remote DB record id");
-            assertFalse(containsId(admin.getElectors(), remoteId),
-                    "Remote DB record must not appear in getElectors() after force-release");
+            // Row is NOT deleted — a force_release_deadline is set to prevent split-brain.
+            // The record remains visible until the deadline elapses and a new node steals the row.
+            assertTrue(containsId(admin.getElectors(), remoteId),
+                    "Remote DB record still present after force-release (deadline set, row not deleted)");
+            // Verify the deadline is set in the database
+            String selectSql = "SELECT force_release_deadline FROM LeaderElection WHERE instance = '" + remoteId + "'";
+            try (Connection conn = ds.getConnection(); java.sql.Statement chkStmt = conn.createStatement();
+                 java.sql.ResultSet rs = chkStmt.executeQuery(selectSql)) {
+                assertTrue(rs.next(), "Row must still exist");
+                assertTrue(rs.getLong(1) > 0, "force_release_deadline must be set to a future epoch millis");
+            }
         } finally {
             elector.close();
         }

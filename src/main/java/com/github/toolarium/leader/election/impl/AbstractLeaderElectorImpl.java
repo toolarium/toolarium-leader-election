@@ -268,9 +268,16 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                 // Placing this after unregister closes the race where the monitor fires
                 // just after task.run() returns and sets interruptedByMonitor=true.
                 leaseMonitor.unregister(lease);
-                boolean wasInterrupted = Thread.interrupted();
-                if (wasInterrupted && !lease.wasInterruptedByMonitor()) {
-                    Thread.currentThread().interrupt();
+                // Synchronize on the lease to close the race where the monitor has already
+                // set interruptedByMonitor=true (via compareAndSet) but has not yet called
+                // taskThread.interrupt(). Without this, Thread.interrupted() could clear a
+                // flag that was never set, allowing the monitor's subsequent interrupt() to
+                // land on the next unrelated task running on this thread.
+                synchronized (lease) {
+                    boolean wasInterrupted = Thread.interrupted();
+                    if (wasInterrupted && !lease.wasInterruptedByMonitor()) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
                 taskLock.unlock();
                 // Remove the entry when no thread is holding the lock to prevent
