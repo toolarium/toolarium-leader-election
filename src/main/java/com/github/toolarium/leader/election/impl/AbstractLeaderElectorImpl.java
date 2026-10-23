@@ -172,7 +172,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * observes. All remaining cleanup (unregistration, monitor shutdown, latch reset) is
      * still performed by {@link #closeInternal(long)}.
      */
-    protected void signalLeaderInvalid() {
+    protected synchronized void signalLeaderInvalid() {
         isLeader = null;
         timestamp = null;
         electionClosed = true;
@@ -397,6 +397,12 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * @param inputDescription the description
      */
     protected synchronized void setLeader(final Boolean isLeader, final String inputDescription) {
+        // Once close() has invalidated the elector, refuse to re-establish leadership.
+        // signalLeaderInvalid() is also synchronized, so electionClosed is visible here
+        // without an additional volatile read race.
+        if (electionClosed && Boolean.TRUE.equals(isLeader)) {
+            return;
+        }
         String newDescription;
         if (inputDescription != null) {
             newDescription = " (" + inputDescription + ").";

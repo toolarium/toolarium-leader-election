@@ -244,20 +244,23 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         try {
             super.closeInternal(wasLeader, Math.max(0L, remainingForSuper));
         } finally {
-            // Delete own leader record so another node can take over immediately.
-            if (currentLeaderRecordId != null) {
-                try {
-                    leaderElectionDAO.deleteLeaderByNameAndInstance(getLeaderElectionInformation().getElectionGroupName(), getId());
-                } catch (Exception e) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug("Error detail:", e);
-                    }
-                    LOG.info("Could not delete leader record on close for [{}]: {}, the row will expire after the configured timeout. "
-                            + "To avoid this delay call close() before the DataSource is destroyed (e.g. @PreDestroy).",
-                            getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
+            // Always attempt to delete the own leader record so another node can take over
+            // immediately. The DELETE targets this node's instance column and is a no-op when
+            // the row does not exist or belongs to another node. We do NOT guard on
+            // currentLeaderRecordId: a tick running concurrently during close() may have
+            // renewed the row while also setting currentLeaderRecordId=null (closing branch),
+            // leaving the row in the table even though this elector is no longer active.
+            try {
+                leaderElectionDAO.deleteLeaderByNameAndInstance(getLeaderElectionInformation().getElectionGroupName(), getId());
+            } catch (Exception e) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Error detail:", e);
                 }
-                currentLeaderRecordId = null;
+                LOG.info("Could not delete leader record on close for [{}]: {}, the row will expire after the configured timeout. "
+                        + "To avoid this delay call close() before the DataSource is destroyed (e.g. @PreDestroy).",
+                        getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
             }
+            currentLeaderRecordId = null;
 
             leaderElectionDAO.close();
         }
