@@ -7,7 +7,7 @@ package com.github.toolarium.leader.election.impl.file;
 
 /**
  * Thread utility
- *  
+ *
  * @author patrick
  */
 public final class ThreadUtil {
@@ -37,7 +37,35 @@ public final class ThreadUtil {
         return HOLDER.INSTANCE;
     }
 
-   
+
+    /**
+     * Returns the id of the current thread.
+     * Uses the deprecated {@link Thread#getId()} for Java 8 compatibility; once the minimum
+     * runtime is raised to Java 19, replace with {@code Thread.currentThread().threadId()} and
+     * add {@code @SuppressWarnings("deprecation")} to suppress the deprecation warning.
+     *
+     * @return the current thread id
+     */
+    public long getThreadId() {
+        return getThreadId(Thread.currentThread());
+    }
+
+
+    /**
+     * Returns the id of thread.
+     * Uses the deprecated {@link Thread#getId()} for Java 8 compatibility; once the minimum
+     * runtime is raised to Java 19, replace with {@code Thread.currentThread().threadId()} and
+     * add {@code @SuppressWarnings("deprecation")} to suppress the deprecation warning.
+     * 
+     * @param thread the cthread
+     * @return the current thread id
+     */
+    @SuppressWarnings("deprecation")
+    public long getThreadId(Thread thread) {
+        return thread.getId();
+    }
+
+
     /**
      * Check if a specific thread is still alive
      *
@@ -48,10 +76,10 @@ public final class ThreadUtil {
         if (id == null) {
             return false;
         }
-        
+
         try {
             for (Thread thread : Thread.getAllStackTraces().keySet()) {
-                if (id == thread.threadId()) {
+                if (id == getThreadId(thread)) {
                     return thread.isAlive();
                 }
             }

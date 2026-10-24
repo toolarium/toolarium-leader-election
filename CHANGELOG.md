@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [ 1.3.0 ] - 2026-10-23
+## [ 1.3.0 ] - 2026-10-24
 ### Added
 - **DATABASE**: `forceRelease()` on a remote leader now prevents split-brain overlap; no other node can acquire leadership until the force-release deadline elapses, ensuring a clean handover.
 - **DATABASE**: automatic schema migration adds the `force_release_deadline` column to existing installations on startup.
@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ALL**: `ILeaderLease.isValid()` correctly returns `false` for leases from a previous leadership term after a lose-and-regain cycle.
 - **DATABASE**: `close()` now correctly interrupts running `runIfLeader` tasks even when the close budget is nearly exhausted.
 - **DATABASE**: a scheduler tick already in flight when `close()` is called can no longer re-establish leadership after `close()` has invalidated it.
+- **ALL**: Java 8 source/target compatibility restored.
+- **FILE**: scheduler fields and channel reference are now correctly visible across threads, preventing resource leaks on `close()`.
+- **FILE**: interrupt flag is preserved when the file-lock scheduler shuts down.
+- **DATABASE**: lease renewal is committed correctly when the data source is configured without auto-commit or when called inside a JTA transaction.
+- **DATABASE**: `forceRelease()` returns `false` for blank ids instead of throwing an undeclared exception.
 
 ## [ 1.2.1 ] - 2026-10-22
 ### Added

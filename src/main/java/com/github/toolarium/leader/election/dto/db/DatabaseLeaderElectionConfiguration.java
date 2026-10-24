@@ -188,7 +188,7 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
          * @throws IllegalArgumentException if the table name is null, blank, or contains invalid characters
          */
         public void setTableName(String tableName) {
-            if (tableName == null || tableName.isBlank()) {
+            if (tableName == null || tableName.trim().isEmpty()) {
                 throw new IllegalArgumentException("Table name must not be null or blank.");
             }
             if (!tableName.matches("[A-Za-z_][A-Za-z0-9_$.]*")) {

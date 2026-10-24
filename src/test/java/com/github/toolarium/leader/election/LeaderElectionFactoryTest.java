@@ -315,7 +315,7 @@ public class LeaderElectionFactoryTest {
     public void testBuilderNullIdentityBecomesUuid() {
         LeaderElectionInformation info = LeaderElectionFactory.builder().identity(null).buildInfo();
         assertNotNull(info.getIdentity(), "null identity must be auto-generated as UUID");
-        assertFalse(info.getIdentity().isBlank(), "auto-generated identity must not be blank");
+        assertFalse(info.getIdentity().trim().isEmpty(), "auto-generated identity must not be blank");
     }
 
 

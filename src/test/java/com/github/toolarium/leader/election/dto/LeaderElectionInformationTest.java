@@ -46,7 +46,7 @@ public class LeaderElectionInformationTest {
         assertNull(info.getNamespace());
         assertEquals(NODE_1, info.getName());
         assertNotNull(info.getIdentity());
-        assertFalse(info.getIdentity().isBlank());
+        assertFalse(info.getIdentity().trim().isEmpty());
     }
 
 

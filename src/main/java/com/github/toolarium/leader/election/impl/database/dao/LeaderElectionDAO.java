@@ -41,9 +41,6 @@ public class LeaderElectionDAO {
     private final DatabaseLeaderElectionConfiguration leaderElectionConfiguration;
     private volatile LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
     private final int queryTimeoutSeconds;
-    // Cached once on first DML call; connection-pool auto-commit does not change at runtime,
-    // so re-reading getAutoCommit() on every statement is redundant overhead (P-2).
-    private volatile Boolean autoCommitCache;
 
 
     /**
@@ -54,20 +51,19 @@ public class LeaderElectionDAO {
     public LeaderElectionDAO(DatabaseLeaderElectionConfiguration leaderElectionConfiguration) {
         this.leaderElectionConfiguration = leaderElectionConfiguration;
         this.leaderElectionDatabaseStructure = leaderElectionConfiguration.getLeaderElectionDatabaseStructure();
-        // Cap each statement timeout so the whole tick (up to 3 sequential statements) fits
-        // within renewDeadline. Using retryPeriod alone allowed 3 * retryPeriod per tick,
-        // which could exceed renewDeadline and create a split-brain window.
-        // A floor of 3 000 ms is enforced: each tick issues up to 3 sequential statements,
-        // each with a minimum 1 s JDBC timeout, so anything below 3 s risks the tick
-        // exceeding the deadline and delaying step-down detection.
+        // Derive the per-statement JDBC query timeout from renewDeadline so the whole tick
+        // (up to 3 sequential statements) fits within the renew deadline.  Using retryPeriod alone
+        // would allow 3 * retryPeriod per tick, which can exceed renewDeadline and create a
+        // split-brain window.  A floor of 3 000 ms ensures queryTimeoutSeconds >= 1: below that
+        // each statement would be given a 0 s timeout, which most drivers treat as "no timeout".
         long renewMillis = leaderElectionConfiguration.getRenewDeadline().toMillis();
         if (renewMillis < 3_000) {
-            LOG.info("renewDeadline [{}ms] is below the minimum of 3 000 ms; adjusted to 3 000 ms. "
-                    + "Configure renewDeadline >= 3 s to avoid this adjustment.", renewMillis);
+            LOG.info("renewDeadline [{}ms] is below 3 000 ms; the per-statement query timeout is "
+                    + "capped at 1 s. A tick with 3 sequential statements may therefore exceed the "
+                    + "renew deadline. Configure renewDeadline >= 3 s to avoid this.", renewMillis);
             renewMillis = 3_000;
         }
         this.queryTimeoutSeconds = Math.max(1, (int) (renewMillis / 3 / 1000));
-        this.autoCommitCache = null;
     }
 
 
@@ -609,15 +605,15 @@ public class LeaderElectionDAO {
      * @throws SQLException if the commit fails
      */
     private void commitIfNeeded(Connection conn) throws SQLException {
-        // Cache the auto-commit flag: it is determined by the connection pool configuration and
-        // does not change at runtime, so calling getAutoCommit() on every DML statement is
-        // redundant.  The volatile field ensures the cached value is visible across threads (P-2).
-        Boolean autoCommit = autoCommitCache;
-        if (autoCommit == null) {
-            autoCommit = conn.getAutoCommit();
-            autoCommitCache = autoCommit;
-        }
-        if (!autoCommit) {
+        // Read getAutoCommit() from the connection on every call: different callers (election
+        // scheduler thread, forceRelease, ILeaderLease.tryExtend inside a JTA transaction) may
+        // receive connections with different auto-commit settings from the pool.  Caching the flag
+        // from the first connection and reusing it for others would either skip a required commit
+        // (rolled-back lease renewal that the elector incorrectly counts as successful) or call
+        // commit() on an auto-commit connection (rejected by pgjdbc).  getAutoCommit() is answered
+        // from the connection state by all common drivers without a round-trip, so the overhead is
+        // negligible.
+        if (!conn.getAutoCommit()) {
             conn.commit();
         }
     }

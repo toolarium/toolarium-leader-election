@@ -129,7 +129,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         consecutiveFailures = 0;          // reset failure count so log level and backoff start fresh
 
         LeaderElectionInformation info = getLeaderElectionInformation();
-        if (info.getName() == null || info.getName().isBlank()) {
+        if (info.getName() == null || info.getName().trim().isEmpty()) {
             throw new LeaderElectionException("LeaderElectionInformation.name must not be blank; set it via Builder.name(\"your-app\").");
         }
 
@@ -368,7 +368,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             for (LeaderElectorRecord record : records) {
                 views.add(new DatabaseRecordView(record));
             }
-            return List.copyOf(views);
+            return Collections.unmodifiableList(new ArrayList<>(views));
         } catch (Exception e) {
             LOG.info("Could not query stored leader records: {}, no action required, result will be retried on next request.", e.getMessage());
             return Collections.emptyList();
@@ -402,7 +402,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * @throws IllegalArgumentException if {@code instanceId} is null or blank
      */
     public boolean forceReleaseRemote(String instanceId) {
-        if (instanceId == null || instanceId.isBlank()) {
+        if (instanceId == null || instanceId.trim().isEmpty()) {
             throw new IllegalArgumentException("instanceId must not be null or blank");
         }
         try {

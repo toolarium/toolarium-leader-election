@@ -67,7 +67,7 @@ public class FileLock implements AutoCloseable {
     public FileLock(File file, Duration lockPeriod, Duration renewDeadline) {
         this.id = UUID.randomUUID();
         this.file = file;
-        this.threadId = Thread.currentThread().threadId();
+        this.threadId = ThreadUtil.getInstance().getThreadId();
         this.user = System.getProperty("user.name");
         this.lockPeriod = lockPeriod;
         this.renewDeadline = renewDeadline;

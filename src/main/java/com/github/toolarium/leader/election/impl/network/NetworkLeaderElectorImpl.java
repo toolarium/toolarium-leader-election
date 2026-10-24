@@ -47,7 +47,10 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
     // close() without holding any lock; volatile is required for the JMM happens-before guarantee.
     private volatile ScheduledExecutorService scheduledExecuterService;
     private volatile ScheduledFuture<?> scheduledFuture;
-    private JChannel channel;
+    // volatile: written by initializeImplementation() (thread A, under lifecycleLock writeLock) and
+    // read by close() (thread B, without any lock); without volatile close() may read a stale null
+    // and skip channel.close(), leaking the JGroups socket and cluster membership (TS-1).
+    private volatile JChannel channel;
     private volatile long channelInitTime;
 
 

@@ -1,5 +1,5 @@
 [![License](https://img.shields.io/github/license/toolarium/toolarium-leader-election)](https://github.com/toolarium/toolarium-leader-election/blob/master/LICENSE)
-[![Maven Central](https://img.shields.io/maven-central/v/com.github.toolarium/toolarium-leader-election/1.2.0)](https://search.maven.org/artifact/com.github.toolarium/toolarium-leader-election/1.2.0/jar)
+[![Maven Central](https://img.shields.io/maven-central/v/com.github.toolarium/toolarium-leader-election/1.3.0)](https://search.maven.org/artifact/com.github.toolarium/toolarium-leader-election/1.3.0/jar)
 [![javadoc](https://javadoc.io/badge2/com.github.toolarium/toolarium-leader-election/javadoc.svg)](https://javadoc.io/doc/com.github.toolarium/toolarium-leader-election)
 
 # toolarium-leader-election
@@ -23,7 +23,7 @@ A strategy must always be specified explicitly; the factory will throw if none i
 
 **Gradle**
 ```gradle
-implementation 'com.github.toolarium:toolarium-leader-election:1.2.0'
+implementation 'com.github.toolarium:toolarium-leader-election:1.3.0'
 ```
 
 **Maven**
@@ -31,7 +31,7 @@ implementation 'com.github.toolarium:toolarium-leader-election:1.2.0'
 <dependency>
     <groupId>com.github.toolarium</groupId>
     <artifactId>toolarium-leader-election</artifactId>
-    <version>1.2.0</version>
+    <version>1.3.0</version>
 </dependency>
 ```
 
@@ -449,7 +449,7 @@ boolean released = admin.forceRelease("elector-uuid");
 
 For a **local** elector `forceRelease` calls `close()`; the elector stops and relinquishes its lock or database row. For a **remote DATABASE** leader the row is deleted from the shared database table directly so another node can claim leadership without waiting for the lease to expire.
 
-`forceRelease(null)` and `forceRelease("unknown-id")` return `false` without throwing.
+`forceRelease(null)`, `forceRelease("")`, and `forceRelease("unknown-id")` return `false` without throwing.
 
 
 ## Testing

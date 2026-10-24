@@ -28,8 +28,11 @@ public final class FileLockFactory {
     private static final Logger LOG = LoggerFactory.getLogger(FileLockFactory.class);
     private static final String LOG_SEP = "] [";
     private Map<FileLock, Long> fileLockMap;
-    private ScheduledExecutorService scheduledExecuterService;
-    private ScheduledFuture<?> scheduledFuture;
+    // volatile: written by startSchedule() (constructor + setScheduleInterval()) and read by the
+    // JVM shutdown hook thread; without volatile the hook may see stale null values and skip
+    // cancel()/shutdown() (TS-2).
+    private volatile ScheduledExecutorService scheduledExecuterService;
+    private volatile ScheduledFuture<?> scheduledFuture;
     private int scheduleInterval = 1; 
 
     
@@ -122,12 +125,12 @@ public final class FileLockFactory {
      */
     public FileLock tryLock(final File file, Duration lockPeriod, Duration renewDeadline) {
         FileLock fileLock = new FileLock(file, lockPeriod, renewDeadline);
-        fileLockMap.put(fileLock, Thread.currentThread().threadId());
+        fileLockMap.put(fileLock, ThreadUtil.getInstance().getThreadId());
 
         try {
             fileLock.lock();
         } catch (FileLockException ex) {
-            LOG.info("Could not acquire file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "]: " + ex.getMessage() + ", will retry on next election tick.");
+            LOG.info("Could not acquire file lock [{}] [{}]: {}, will retry on next election tick.", fileLock.getId(), fileLock.getFile(), ex.getMessage());
         }
         return fileLock;
     }
@@ -150,7 +153,7 @@ public final class FileLockFactory {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("File lock [" + fileLock.getId() + "]  [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
             }
-            LOG.info("File lock [" + fileLock.getId() + "] [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage() + ", lock will expire automatically.");
+            LOG.info("File lock [{}] [{}] on {} could not be removed: {}, lock will expire automatically.", fileLock.getId(), fileLock.getFile(), fileLock.getLockTime(), e.getMessage());
         }
     }
 
@@ -213,7 +216,7 @@ public final class FileLockFactory {
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Unexpected exception: " + e.getMessage(), e);
                 }
-                LOG.info("Unexpected exception during file lock check: " + e.getMessage() + ", no action required, will retry on next check.");
+                LOG.info("Unexpected exception during file lock check: {}, no action required, will retry on next check.", e.getMessage());
             }
         }
     }
@@ -251,7 +254,9 @@ public final class FileLockFactory {
                 try {
                     scheduledExecuterService.awaitTermination(scheduleInterval, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
-                    //
+                    // Restore the interrupt flag so the calling thread (e.g. setScheduleInterval()
+                    // or the JVM shutdown hook) can observe that it was interrupted (RES-1).
+                    Thread.currentThread().interrupt();
                 }
             } catch (Exception e) {
                 // NOP
@@ -283,7 +288,7 @@ public final class FileLockFactory {
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
                     }
-                    LOG.info("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage() + ", lock will expire automatically.");
+                    LOG.info("File lock [{}] [{}] on {} could not be removed: {}, lock will expire automatically.", fileLock.getId(), fileLock.getFile(), fileLock.getLockTime(), e.getMessage());
                 }
             }
         }
