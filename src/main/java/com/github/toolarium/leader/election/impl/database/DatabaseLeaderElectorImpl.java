@@ -201,7 +201,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             if (cause instanceof LeaderElectionException) {
                 throw (LeaderElectionException) cause;
             }
-            throw new LeaderElectionException("Could not extend leader lease: " + cause.getMessage(), cause);
+            throw new LeaderElectionException("Could not extend leader lease: " + cause.getMessage(), e);
         }
     }
 
