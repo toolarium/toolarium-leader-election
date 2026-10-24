@@ -91,7 +91,7 @@ final class LeaderLeaseMonitor {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Could not check the leader leases: " + e.getMessage(), e);
             }
-            LOG.warn("Could not check the leader leases: {}", e.getMessage());
+            LOG.info("Could not check the leader leases: {}, will retry on next check interval.", e.getMessage());
         }
     }
 }

@@ -16,7 +16,7 @@ A Java library for leader election across distributed nodes. It provides a unifi
 | `KUBERNETES` | Kubernetes lease / endpoints lock | `io.kubernetes:client-java` + `client-java-extended` |
 | `DATABASE` | JDBC optimistic locking against a shared table | JDBC driver for your database |
 
-A strategy must always be specified explicitly — the factory will throw if none is provided.
+A strategy must always be specified explicitly; the factory will throw if none is provided.
 
 
 ## Adding the library
@@ -40,7 +40,7 @@ The library only brings `slf4j-api` as a transitive dependency. You must provide
 
 ## Strategy-specific dependencies
 
-### FILE — no extra dependency
+### FILE: no extra dependency
 
 The FILE strategy uses standard JDK `java.nio.channels.FileLock`. No additional library is needed. All nodes must share the same filesystem path.
 
@@ -120,7 +120,7 @@ implementation 'com.h2database:h2:2.4.240'
 The recommended way to create a leader elector is the fluent builder. It is a two-step API: first configure the common identity and timing on `LeaderElectionFactory.builder()`, then select a strategy to obtain a strategy-specific sub-builder with its own options. A strategy must always be specified explicitly.
 
 ```java
-// FILE strategy — basePath is optional (defaults to java.io.tmpdir)
+// FILE strategy; basePath is optional (defaults to java.io.tmpdir)
 ILeaderElector elector = LeaderElectionFactory.builder()
     .namespace("my-ns").name("my-service").identity("node-1")
     .timeout(Duration.ofSeconds(10)).renewDeadline(Duration.ofSeconds(7)).retryPeriod(Duration.ofSeconds(3))
@@ -144,7 +144,7 @@ ILeaderElector elector = LeaderElectionFactory.builder()
 ```
 
 ```java
-// DATABASE strategy — minimal setup (dialect auto-detected on first connection)
+// DATABASE strategy; minimal setup (dialect auto-detected on first connection)
 ILeaderElector elector = LeaderElectionFactory.builder()
     .namespace("my-ns").name("my-service").identity("node-1")
     .database()
@@ -153,7 +153,7 @@ ILeaderElector elector = LeaderElectionFactory.builder()
 ```
 
 ```java
-// DATABASE strategy — explicit dialect structure (e.g. Oracle)
+// DATABASE strategy; explicit dialect structure (e.g. Oracle)
 ILeaderElector elector = LeaderElectionFactory.builder()
     .namespace("my-ns").name("my-service").identity("node-1")
     .database()
@@ -162,7 +162,7 @@ ILeaderElector elector = LeaderElectionFactory.builder()
         .build();
 ```
 
-The builder `timeout()`, `renewDeadline()`, `retryPeriod()`, and `closeTimeout()` are common to all strategies. Call `.file()`, `.database()`, `.network()`, or `.kubernetes()` to select a strategy — those timing values are applied to the strategy-specific configuration automatically.
+The builder `timeout()`, `renewDeadline()`, `retryPeriod()`, and `closeTimeout()` are common to all strategies. Call `.file()`, `.database()`, `.network()`, or `.kubernetes()` to select a strategy; those timing values are applied to the strategy-specific configuration automatically.
 
 ### LeaderElectionInformation
 
@@ -171,7 +171,7 @@ The builder `timeout()`, `renewDeadline()`, `retryPeriod()`, and `closeTimeout()
 | Constructor | When to use |
 |---|---|
 | `new LeaderElectionInformation("namespace", "name", "identity")` | Kubernetes strategy (required) or multi-group deployments |
-| `new LeaderElectionInformation("groupName")` | FILE, NETWORK, and DATABASE strategies — the value becomes both the group name and the node identity |
+| `new LeaderElectionInformation("groupName")` | FILE, NETWORK, and DATABASE strategies; the value becomes both the group name and the node identity |
 
 For the DATABASE strategy the election group key is `"namespace.name"` (without the identity), so all nodes sharing the same namespace+name form one election group.
 
@@ -179,10 +179,10 @@ For the DATABASE strategy the election group key is `"namespace.name"` (without 
 
 | Method | Description |
 |---|---|
-| `elect()` | Participate in the election and block until the first result is known. Returns `true` if this node is elected leader. Idempotent — safe to call more than once. |
+| `elect()` | Participate in the election and block until the first result is known. Returns `true` if this node is elected leader. Idempotent; safe to call more than once. |
 | `elect(Duration timeout)` | Same as `elect()` but gives up and returns `false` if the timeout elapses before the first result is known. |
 | `runIfLeader(String name, ILeaderTask task)` | Execute a task on the calling thread only if this node is currently leader. The task receives an `ILeaderLease` to check and extend the lease mid-execution. Returns `true` if the task ran, `false` if this node was not the leader. |
-| `runIfLeader(String name, Runnable task)` | Convenience overload — wraps a `Runnable` as an `ILeaderTask`. |
+| `runIfLeader(String name, Runnable task)` | Convenience overload; wraps a `Runnable` as an `ILeaderTask`. |
 | `isLeader()` | Returns `true` if this node currently holds the lease. Accurate immediately after `elect()` returns. |
 | `getLeaderElectorTimestamp()` | Returns the `Instant` when this node last confirmed its leadership, or `null` if not leader. |
 | `getId()` | Returns the unique instance identifier for this elector. |
@@ -195,12 +195,12 @@ Both `elect()` variants throw `InterruptedException` if the calling thread is in
 `runIfLeader` executes work on the calling thread only when this node holds leadership. If leadership is lost while the task runs, the task thread is interrupted automatically.
 
 ```java
-// Simple Runnable — no lease needed
+// Simple Runnable; no lease needed
 elector.runIfLeader("do-work", () -> {
     processQueue();
 });
 
-// ILeaderTask — access the lease inside the task
+// ILeaderTask; access the lease inside the task
 elector.runIfLeader("do-work", lease -> {
     while (!Thread.currentThread().isInterrupted()) {
         processQueue();
@@ -225,7 +225,7 @@ elector.runIfLeader("do-work", lease -> {
 | `tryExtend()` | Attempts to push the lease deadline further out. Returns `true` on success. For FILE and DATABASE strategies this performs an actual renewal; for NETWORK and KUBERNETES it is a no-op that returns `isLeader()`. |
 | `getLeaderSince()` | Returns the `Instant` when the last successful renewal or extension was recorded. |
 | `getRemainingLeadTime()` | Approximate time until the lease expires, computed from `getLeaderSince()` and `timeout`. |
-| `isExpiringSoon(Duration threshold)` | Returns `true` if the remaining lead time is less than `threshold` — useful for deciding when to call `tryExtend()`. |
+| `isExpiringSoon(Duration threshold)` | Returns `true` if the remaining lead time is less than `threshold`, useful for deciding when to call `tryExtend()`. |
 | `getId()` | The elector's unique instance identifier. |
 | `getLeaderElectionInformation()` | The `ILeaderElectionInformation` for this election group. |
 | `getLeaderElectionConfiguration()` | The `ILeaderElectionConfiguration` in effect. |
@@ -236,7 +236,7 @@ elector.runIfLeader("do-work", lease -> {
 
 | Strategy | How `elect()` unblocks |
 |---|---|
-| `DATABASE` | First election round runs synchronously inside `elect()` — returns immediately. |
+| `DATABASE` | The first election tick fires immediately in the scheduler thread (`initialDelay = 0`). `elect()` blocks until that tick completes and returns `isLeader()`. `elect(Duration)` returns `false` if the timeout elapses before the first tick finishes; use a timeout of at least one `retryPeriod` (or a few seconds) to give the tick time to complete, especially against remote databases or pools with an acquisition timeout. |
 | `FILE` | Blocks until the file lock is acquired or confirmed unavailable (~200 ms). |
 | `NETWORK` | Leadership determined from the initial JGroups membership view. Returns immediately when elected; otherwise blocks until the result is confirmed (up to `timeout`). |
 | `KUBERNETES` | Blocks until the background update thread delivers the first leadership callback. |
@@ -294,7 +294,7 @@ leaderElector.elect();
 
 ### DATABASE strategy
 
-Pass any standard `javax.sql.DataSource` — a connection pool like HikariCP is recommended for production.
+Pass any standard `javax.sql.DataSource`, a connection pool like HikariCP is recommended for production.
 
 Via builder (recommended):
 
@@ -328,7 +328,7 @@ leaderElector.elect();
 The library creates and manages the required `LeaderElection` table automatically. On startup it inspects the table schema and, if a v1.0.0 installation is detected (column named `timestamp`), renames it to `lease_ts` automatically. On new installations a secondary index on the `instance` column is also created; existing installations can add it manually with `CREATE INDEX idx_leaderelection_instance ON LeaderElection(instance)`.
 
 > **Externally managed schemas (Flyway, Liquibase, no DDL rights)**
-> If the database user has no DDL privileges, or the table is managed by a migration tool, set `allowDdl=false` on the configuration. The library will then fail fast with a descriptive error — including the exact DDL to apply — instead of attempting `CREATE TABLE` or `ALTER TABLE` at startup:
+> If the database user has no DDL privileges, or the table is managed by a migration tool, set `allowDdl=false` on the configuration. The library will then fail fast with a descriptive error, including the exact DDL to apply, instead of attempting `CREATE TABLE` or `ALTER TABLE` at startup:
 >
 > ```java
 > config.setAllowDdl(false);  // disable runtime DDL; elect() throws if the table or column is missing
@@ -364,7 +364,7 @@ By default the library uses `JDBCLeaderElectionDatabaseStructure`, which is comp
 | SQL Server | `SQLServerLeaderElectionDatabaseStructure` |
 
 ```java
-// Oracle — via builder
+// Oracle, via builder
 ILeaderElector elector = LeaderElectionFactory.builder()
     .namespace("ns").name("app").identity("node-1")
     .database()
@@ -372,7 +372,7 @@ ILeaderElector elector = LeaderElectionFactory.builder()
         .databaseStructure(new OracleLeaderElectionDatabaseStructure())
         .build();
 
-// MySQL — directly on config
+// MySQL, directly on config
 DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(10);
 config.setDataSource(ds);
 config.setLeaderElectionDatabaseStructure(new MySQLLeaderElectionDatabaseStructure());
@@ -428,7 +428,7 @@ for (ILeaderElectorView view : leaders) {
 }
 ```
 
-For the **DATABASE** strategy `getElectors()` returns leaders held by **all nodes in the cluster** — records are read directly from the shared database table. For all other strategies only electors running in this JVM are returned.
+For the **DATABASE** strategy `getElectors()` returns leaders held by **all nodes in the cluster**; records are read directly from the shared database table. For all other strategies only electors running in this JVM are returned.
 
 ### ILeaderElectorView API
 
@@ -447,7 +447,7 @@ For the **DATABASE** strategy `getElectors()` returns leaders held by **all node
 boolean released = admin.forceRelease("elector-uuid");
 ```
 
-For a **local** elector `forceRelease` calls `close()` — the elector stops and relinquishes its lock or database row. For a **remote DATABASE** leader the row is deleted from the shared database table directly so another node can claim leadership without waiting for the lease to expire.
+For a **local** elector `forceRelease` calls `close()`; the elector stops and relinquishes its lock or database row. For a **remote DATABASE** leader the row is deleted from the shared database table directly so another node can claim leadership without waiting for the lease to expire.
 
 `forceRelease(null)` and `forceRelease("unknown-id")` return `false` without throwing.
 
@@ -484,7 +484,7 @@ Each integration test starts its own container via [Testcontainers](https://test
 
 ## Built With
 
-* [cb](https://github.com/toolarium/common-build) - The toolarium common build
+* [cb](https://github.com/toolarium/common-build), the toolarium common build
 
 ## Versioning
 

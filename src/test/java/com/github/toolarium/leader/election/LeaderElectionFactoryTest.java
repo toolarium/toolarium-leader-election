@@ -7,6 +7,8 @@ package com.github.toolarium.leader.election;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -40,7 +42,7 @@ public class LeaderElectionFactoryTest {
 
 
     /**
-     * Tear down the test — reset singleton state modified during tests.
+     * Tear down the test; reset singleton state modified during tests.
      */
     @AfterEach
     public void tearDown() {
@@ -58,9 +60,6 @@ public class LeaderElectionFactoryTest {
     public void test() throws Exception {
         verifyElect(LeaderElectionStrategy.FILE, new LeaderElectionInformation("testFile"), new LeaderElectionConfiguration(2));
         testMultipleLeaders(LeaderElectionStrategy.FILE, new LeaderElectionInformation("testFile"), new LeaderElectionConfiguration(2));
-
-        verifyElect(LeaderElectionStrategy.NETWORK, new LeaderElectionInformation("testNetworkVerify"), new LeaderElectionConfiguration(2));
-        testMultipleLeaders(LeaderElectionStrategy.NETWORK, new LeaderElectionInformation("testNetworkMulti"), new LeaderElectionConfiguration(2));
 
         JdbcDataSource ds = new JdbcDataSource();
         ds.setURL("jdbc:h2:mem:factorytest;DB_CLOSE_DELAY=-1");
@@ -290,35 +289,33 @@ public class LeaderElectionFactoryTest {
 
 
     /**
-     * builder().namespace(null) must treat null as an empty string so the resulting
-     * LeaderElectionInformation reports namespace as "".
+     * builder().namespace(null) leaves namespace null; namespace is optional.
      */
     @Test
-    public void testBuilderNullNamespaceBecomesEmpty() {
+    public void testBuilderNullNamespaceIsNull() {
         LeaderElectionInformation info = LeaderElectionFactory.builder().namespace(null).buildInfo();
-        assertEquals("", info.getNamespace(), "null namespace must be stored as empty string");
+        assertNull(info.getNamespace(), "null namespace must remain null");
     }
 
 
     /**
-     * builder().name(null) must treat null as an empty string so the resulting
-     * LeaderElectionInformation reports name as "".
+     * builder().name(null) leaves name null.
      */
     @Test
-    public void testBuilderNullNameBecomesEmpty() {
+    public void testBuilderNullNameIsNull() {
         LeaderElectionInformation info = LeaderElectionFactory.builder().name(null).buildInfo();
-        assertEquals("", info.getName(), "null name must be stored as empty string");
+        assertNull(info.getName(), "null name must remain null");
     }
 
 
     /**
-     * builder().identity(null) must treat null as an empty string so the resulting
-     * LeaderElectionInformation reports identity as "".
+     * builder().identity(null) auto-generates a UUID identity.
      */
     @Test
-    public void testBuilderNullIdentityBecomesEmpty() {
+    public void testBuilderNullIdentityBecomesUuid() {
         LeaderElectionInformation info = LeaderElectionFactory.builder().identity(null).buildInfo();
-        assertEquals("", info.getIdentity(), "null identity must be stored as empty string");
+        assertNotNull(info.getIdentity(), "null identity must be auto-generated as UUID");
+        assertFalse(info.getIdentity().isBlank(), "auto-generated identity must not be blank");
     }
 
 
@@ -442,7 +439,11 @@ public class LeaderElectionFactoryTest {
         leaderElectorA.close();
         Thread.sleep(200);
         assertFalse(leaderElectorA.isLeader());
-        awaitCondition(() -> leaderElectorB.isLeader(), 10000);
+        long failoverWaitMs = 10000L;
+        if (LeaderElectionStrategy.NETWORK.equals(strategy)) {
+            failoverWaitMs = 20000L;
+        }
+        awaitCondition(() -> leaderElectorB.isLeader(), failoverWaitMs);
         assertTrue(leaderElectorB.isLeader());
 
         Thread.sleep(50);

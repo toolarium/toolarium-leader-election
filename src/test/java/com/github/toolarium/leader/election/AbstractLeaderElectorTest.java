@@ -276,7 +276,7 @@ public abstract class AbstractLeaderElectorTest {
                     releaseTask.await(); // blocks until the main thread releases it
                 });
             } catch (Exception e) {
-                // ignored — task may be interrupted on close
+                // ignored; task may be interrupted on close
             }
         });
         bgThread.start();
@@ -358,7 +358,7 @@ public abstract class AbstractLeaderElectorTest {
         elector.close();
         assertFalse(elector.isLeader(), "Must not be leader after close()");
 
-        // Second lifecycle — same object instance
+        // Second lifecycle; same object instance
         assertTrue(elector.elect(Duration.ofMillis(getInitWaitMillis())), "Must become leader again after close()");
         assertTrue(elector.isLeader());
         elector.close();

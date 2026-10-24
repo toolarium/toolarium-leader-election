@@ -36,16 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [ 1.2.0 ] - 2026-10-20
 ### Added
-- **Administration API** — `ILeaderElectionAdministration`: snapshot all electors currently holding leadership via `getElectors()` and force-release a specific lease via `forceRelease(String id)`. Available via `LeaderElectionFactory.getInstance().getLeaderElectionAdministration()`.
-- **`ILeaderElectorView`** — read-only view of an active leader: id, election group, configuration, and last confirmed timestamp.
-- **DATABASE cross-node visibility** — `getElectors()` returns leaders from all nodes in the cluster, not only the local JVM. `forceRelease()` on a remote DATABASE leader takes effect immediately without waiting for the lease timeout.
+- **Administration API**: `ILeaderElectionAdministration`: snapshot all electors currently holding leadership via `getElectors()` and force-release a specific lease via `forceRelease(String id)`. Available via `LeaderElectionFactory.getInstance().getLeaderElectionAdministration()`.
+- **`ILeaderElectorView`**: read-only view of an active leader: id, election group, configuration, and last confirmed timestamp.
+- **DATABASE cross-node visibility**: `getElectors()` returns leaders from all nodes in the cluster, not only the local JVM. `forceRelease()` on a remote DATABASE leader takes effect immediately without waiting for the lease timeout.
 - `runIfLeader(String, ILeaderTask)` and `runIfLeader(String, Runnable)`: execute work on the calling thread only when this node holds leadership; interrupted automatically when leadership is lost.
 - `ILeaderLease` interface: read-only access to leadership state (`isValid()`, `verify()`), elector identity, configuration, and lease timing (`getLeaderSince()`, `getRemainingLeadTime()`, `isExpiringSoon(Duration)`).
 - `MockKubernetesLeaderElector.builder()`: fluent builder for mock Kubernetes electors in tests.
 
 ### Changed
 - **Breaking API change**: `void initialize()` replaced by `boolean elect()` and `boolean elect(Duration timeout)`. `elect()` blocks until the first result is known and returns `isLeader()` directly.
-- Strategy selection is now always explicit — `LeaderElectionFactory` requires a strategy; the previous auto-detection fallback (Kubernetes → Network) has been removed.
+- Strategy selection is now always explicit; `LeaderElectionFactory` requires a strategy; the previous auto-detection fallback (Kubernetes → Network) has been removed.
 - DATABASE strategy: SQL dialect is auto-detected from the JDBC connection when not configured explicitly.
 - README: updated all usage examples and the API reference table.
 
@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DATABASE strategy: the election group key is derived from the election name only, so all nodes with the same name form one group.
 - NETWORK strategy: initial leadership is determined synchronously during `initialize()`.
 - KUBERNETES strategy: the API client is scoped to the elector instance; the JVM-global default client is no longer mutated.
-- `LeaderElectionConfiguration`: validation corrected — `renewDeadline` must be strictly less than `timeout`, and `retryPeriod` must be ≤ `renewDeadline`.
+- `LeaderElectionConfiguration`: validation corrected; `renewDeadline` must be strictly less than `timeout`, and `retryPeriod` must be ≤ `renewDeadline`.
 - README: updated API reference, configuration defaults, and back-off behaviour.
 
 ## [ 1.0.0 ] - 2026-08-18

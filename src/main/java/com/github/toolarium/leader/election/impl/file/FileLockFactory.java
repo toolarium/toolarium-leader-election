@@ -127,7 +127,7 @@ public final class FileLockFactory {
         try {
             fileLock.lock();
         } catch (FileLockException ex) {
-            LOG.warn("Could not acquire file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "]: " + ex.getMessage());
+            LOG.info("Could not acquire file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "]: " + ex.getMessage() + ", will retry on next election tick.");
         }
         return fileLock;
     }
@@ -150,7 +150,7 @@ public final class FileLockFactory {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("File lock [" + fileLock.getId() + "]  [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
             }
-            LOG.warn("File lock [" + fileLock.getId() + "]  [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage());
+            LOG.info("File lock [" + fileLock.getId() + "] [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage() + ", lock will expire automatically.");
         }
     }
 
@@ -174,10 +174,14 @@ public final class FileLockFactory {
                         LOG.debug("Verify lock " + fileLock);
                     }
                     long now = Instant.now().toEpochMilli();
-                    
+
+                    // Capture getLockTime() once: it is a volatile field that unlock() sets to
+                    // null concurrently, so a double-read (null-check then .toEpochMilli()) would
+                    // produce a NullPointerException if the value changes between the two reads.
+                    Instant lockInstant = fileLock.getLockTime();
                     long lockTime = 0;
-                    if (fileLock.getLockTime() != null) {
-                        lockTime = fileLock.getLockTime().toEpochMilli();
+                    if (lockInstant != null) {
+                        lockTime = lockInstant.toEpochMilli();
                     }
                     
                     if (fileLock.getRenewDeadline() != null) {
@@ -207,9 +211,9 @@ public final class FileLockFactory {
                 }
             } catch (Exception e) {
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug("Unexpeted exception: " + e.getMessage(), e);
+                    LOG.debug("Unexpected exception: " + e.getMessage(), e);
                 }
-                LOG.warn("Unexpeted exception: " + e.getMessage());
+                LOG.info("Unexpected exception during file lock check: " + e.getMessage() + ", no action required, will retry on next check.");
             }
         }
     }
@@ -279,7 +283,7 @@ public final class FileLockFactory {
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
                     }
-                    LOG.warn("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage());
+                    LOG.info("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage() + ", lock will expire automatically.");
                 }
             }
         }

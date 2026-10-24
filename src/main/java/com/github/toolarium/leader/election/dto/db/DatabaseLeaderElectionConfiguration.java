@@ -22,7 +22,7 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
      * Current schema version. Increment this constant and add a corresponding migration
      * step in {@code LeaderElectionDAO.validateAndMigrateSchema()} whenever the DDL changes.
      * <ul>
-     *   <li>Version 1 — initial schema with {@code lease_ts} (renamed from legacy {@code timestamp} column).</li>
+     *   <li>Version 1 - initial schema with {@code lease_ts} (renamed from legacy {@code timestamp} column).</li>
      * </ul>
      */
     public static final int SCHEMA_VERSION = 1;
@@ -147,7 +147,7 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
      */
     protected void validate() {
         super.validate();
-        // leaderElectionDatabaseStructure may be null here — the DAO auto-detects the
+        // leaderElectionDatabaseStructure may be null here; the DAO auto-detects the
         // correct dialect from the JDBC product name on first connection if none is set.
     }
 

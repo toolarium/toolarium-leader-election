@@ -47,7 +47,7 @@ import org.junit.jupiter.api.Test;
 public class DatabaseLeaderLeaseTest {
 
     // -----------------------------------------------------------------------
-    // Issue #4: leadership-term counter — lease is invalid after re-acquisition.
+    // Issue #4: leadership-term counter; lease is invalid after re-acquisition.
     // -----------------------------------------------------------------------
 
     /**
@@ -73,12 +73,12 @@ public class DatabaseLeaderLeaseTest {
         assertTrue(savedLease.get().isValid(),
                 "Lease must be valid immediately after capture while elector is still leader");
 
-        // Close the elector — leadership is lost, term does not increment on step-down.
+        // Close the elector; leadership is lost, term does not increment on step-down.
         elector.close();
         assertFalse(savedLease.get().isValid(),
                 "Lease must be invalid after elector is closed");
 
-        // Re-elect the same elector object — this is a real new acquisition so the term increments.
+        // Re-elect the same elector object; this is a real new acquisition so the term increments.
         assertTrue(elector.elect(), "Re-elect after close must succeed");
         assertTrue(elector.isLeader(), "Elector must be leader again after re-elect");
 
@@ -123,7 +123,7 @@ public class DatabaseLeaderLeaseTest {
                     Thread.sleep(30_000L); // blocks until the monitor interrupts it
                 });
             } catch (Exception ignored) {
-                // runIfLeader may surface a LeaderElectionException on close — ignore it here.
+                // runIfLeader may surface a LeaderElectionException on close; ignore it here.
             }
             // Record the interrupt flag on THIS thread immediately after runIfLeader() returns.
             interruptFlagAfterReturn.set(Thread.currentThread().isInterrupted());
@@ -196,7 +196,7 @@ public class DatabaseLeaderLeaseTest {
                     }
                 });
             } catch (Exception ignored) {
-                // runIfLeader may surface exceptions on close — intentionally ignored
+                // runIfLeader may surface exceptions on close; intentionally ignored
             }
             taskFinished.countDown();
         }, "interrupt-once-task");
@@ -220,7 +220,7 @@ public class DatabaseLeaderLeaseTest {
 
     /**
      * Verify that a {@link RuntimeException} thrown by the task passed to
-     * {@code runIfLeader()} propagates out as-is — it must not be wrapped in a
+     * {@code runIfLeader()} propagates out as-is; it must not be wrapped in a
      * {@link com.github.toolarium.leader.election.exception.LeaderElectionException}.
      *
      * <p>Before the fix there was no dedicated {@code catch (RuntimeException e)} branch;

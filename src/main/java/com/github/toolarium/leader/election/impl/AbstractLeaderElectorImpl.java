@@ -375,7 +375,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * the leadership-term counter from being incremented by any {@code setLeader(true)}
      * calls that happen as a side-effect of the extension (e.g. the FILE strategy's
      * {@code FileLock.renew()} fires {@code releaseLock()} + {@code hasLock()} callbacks
-     * internally — those must not count as a real leader-lost / leader-gained transition).
+     * internally; those must not count as a real leader-lost / leader-gained transition).
      *
      * @return {@code true} if this node is still the leader after the extension attempt
      * @throws LeaderElectionException if the extension attempt fails with an unrecoverable error
@@ -418,7 +418,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
 
             this.timestamp = null;
         } else if (isLeader.booleanValue()) {
-            // I'm the leader — update timestamp on every confirmation so getRemainingLeadTime()
+            // I'm the leader; update timestamp on every confirmation so getRemainingLeadTime()
             // reflects the last renewal/extension rather than only the initial acquisition.
             if (this.isLeader == null || !this.isLeader) {
                 if (!extendingInProgress.get()) {
@@ -427,13 +427,13 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                     leadershipTerm.incrementAndGet();
                     LOG.info("Gained lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
                 }
-                // If extendingInProgress, we're inside tryExtend() — the unlock+lock cycle of
+                // If extendingInProgress, we're inside tryExtend(); the unlock+lock cycle of
                 // e.g. FileLock.renew() fires releaseLock+hasLock callbacks but the node never
                 // truly lost leadership, so the term must not increment.
             }
             this.timestamp = Instant.now();
         } else {
-            // No longer leader — the LeaderLeaseMonitor will detect isValid()==false on its
+            // No longer leader; the LeaderLeaseMonitor will detect isValid()==false on its
             // next 100 ms tick and interrupt any running tasks; no direct interrupt here.
             if (this.isLeader != null && this.isLeader) {
                 LOG.info("Lost lead of [{}]{}", leaderElectionInformation.getUniqueName(), newDescription);
@@ -490,7 +490,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * @throws LeaderElectionException In case of an initialisation error
      */
     private void startElectionIfNeeded() throws LeaderElectionException {
-        // Fast-path: already initialized — no lock needed (volatile read).
+        // Fast-path: already initialized; no lock needed (volatile read).
         if (isInitialized) {
             return;
         }

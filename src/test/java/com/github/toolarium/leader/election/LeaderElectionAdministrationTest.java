@@ -183,7 +183,7 @@ public class LeaderElectionAdministrationTest {
                     "Remote DB record must appear in getElectors() before force-release");
             assertTrue(admin.forceRelease(remoteId),
                     "forceRelease must return true for a known remote DB record id");
-            // Row is NOT deleted — a force_release_deadline is set to prevent split-brain.
+            // Row is NOT deleted; a force_release_deadline is set to prevent split-brain.
             // The record remains visible until the deadline elapses and a new node steals the row.
             assertTrue(containsId(admin.getElectors(), remoteId),
                     "Remote DB record still present after force-release (deadline set, row not deleted)");

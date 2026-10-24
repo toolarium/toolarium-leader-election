@@ -61,7 +61,7 @@ public class DatabaseLeaderElectorBackoffTest {
                 config);
         assertTrue(elector.elect(), "Elector must establish leadership before test can proceed");
 
-        // Induce failures — each scheduler tick (300 ms) will throw on getConnection()
+        // Induce failures; each scheduler tick (300 ms) will throw on getConnection()
         fds.setFailing(true);
 
         // Wait for at least CONSECUTIVE_FAILURE_THRESHOLD ticks to fail.

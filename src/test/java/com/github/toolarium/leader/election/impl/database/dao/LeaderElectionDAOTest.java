@@ -95,7 +95,7 @@ public class LeaderElectionDAOTest {
         DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(2);
         config.setDataSource(ds);
 
-        // Create old schema: "timestamp" double-quoted (required in H2 — reserved keyword)
+        // Create old schema: "timestamp" double-quoted (required in H2; reserved keyword)
         try (Connection conn = ds.getConnection(); Statement stmt = conn.createStatement()) {
             stmt.execute("CREATE TABLE LeaderElection"
                     + "(id varchar(36) not NULL, name varchar(512) not NULL, "
@@ -180,12 +180,12 @@ public class LeaderElectionDAOTest {
         assertNotNull(current);
         assertEquals("instance-B", current.getInstance());
 
-        // Second steal attempt with the stale id — row id has changed, must return 0
+        // Second steal attempt with the stale id; row id has changed, must return 0
         int secondSteal = dao.stealLeadership(STEAL_GROUP, "uuid-old", expiryThreshold, now,
                 new LeaderElectorRecord(STEAL_GROUP, "instance-C", "user3"));
         assertEquals(0, secondSteal, "Stealing with an outdated id must fail");
 
-        // Insert a fresh leader and attempt to steal a non-expired lease — must fail
+        // Insert a fresh leader and attempt to steal a non-expired lease; must fail
         LeaderElectorRecord freshLeader = new LeaderElectorRecord("uuid-fresh", "freshgroup", "instance-A", USER, System.currentTimeMillis());
         assertEquals(1, dao.insertLeader(freshLeader));
         // expiryThreshold is in the past but the fresh lease is newer, so lease_ts > expiryThreshold

@@ -6,7 +6,11 @@
 package com.github.toolarium.leader.election.dto;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -39,9 +43,10 @@ public class LeaderElectionInformationTest {
     @Test
     public void testIdentityOnlyConstructor() {
         LeaderElectionInformation info = new LeaderElectionInformation(NODE_1);
-        assertEquals("", info.getNamespace());
-        assertEquals("", info.getName());
-        assertEquals(NODE_1, info.getIdentity());
+        assertNull(info.getNamespace());
+        assertEquals(NODE_1, info.getName());
+        assertNotNull(info.getIdentity());
+        assertFalse(info.getIdentity().isBlank());
     }
 
 
@@ -56,12 +61,12 @@ public class LeaderElectionInformationTest {
 
 
     /**
-     * Test getUniqueName with only identity.
+     * Test getUniqueName with only name set (single-arg constructor); identity is auto-generated.
      */
     @Test
-    public void testGetUniqueNameIdentityOnly() {
+    public void testGetUniqueNameNameOnly() {
         LeaderElectionInformation info = new LeaderElectionInformation(NODE_1);
-        assertEquals(NODE_1, info.getUniqueName());
+        assertTrue(info.getUniqueName().startsWith(NODE_1 + "."));
     }
 
 
@@ -120,7 +125,7 @@ public class LeaderElectionInformationTest {
 
 
     /**
-     * Test getElectionGroupName with all fields set — identity is excluded from the key so that
+     * Test getElectionGroupName with all fields set; identity is excluded from the key so that
      * all per-node identities compete for the same database row.
      */
     @Test
@@ -131,7 +136,7 @@ public class LeaderElectionInformationTest {
 
 
     /**
-     * Test getElectionGroupName with identity only — falls back to identity so that the
+     * Test getElectionGroupName with identity only; falls back to identity so that the
      * single-argument constructor continues to work as the election group key.
      */
     @Test
@@ -168,7 +173,7 @@ public class LeaderElectionInformationTest {
     public void testToString() {
         LeaderElectionInformation info = new LeaderElectionInformation(NAMESPACE, APP_NAME, NODE_1);
         String str = info.toString();
-        // username is the OS user at test runtime — verify the fixed parts only
+        // username is the OS user at test runtime; verify the fixed parts only
         org.junit.jupiter.api.Assertions.assertTrue(str.startsWith("LeaderElectionInformation [namespace=ns, name=myapp, identity=node-1, username="));
         org.junit.jupiter.api.Assertions.assertTrue(str.endsWith("]"));
     }

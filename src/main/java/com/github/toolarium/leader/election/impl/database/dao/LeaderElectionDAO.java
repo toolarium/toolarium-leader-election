@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Leader election database access object.
  * Each public method borrows a connection from the DataSource, uses it, and returns it
- * immediately — connections are never held between calls.
+ * immediately; connections are never held between calls.
  *
  * @author patrick
  */
@@ -41,6 +41,9 @@ public class LeaderElectionDAO {
     private final DatabaseLeaderElectionConfiguration leaderElectionConfiguration;
     private volatile LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
     private final int queryTimeoutSeconds;
+    // Cached once on first DML call; connection-pool auto-commit does not change at runtime,
+    // so re-reading getAutoCommit() on every statement is redundant overhead (P-2).
+    private volatile Boolean autoCommitCache;
 
 
     /**
@@ -54,25 +57,22 @@ public class LeaderElectionDAO {
         // Cap each statement timeout so the whole tick (up to 3 sequential statements) fits
         // within renewDeadline. Using retryPeriod alone allowed 3 * retryPeriod per tick,
         // which could exceed renewDeadline and create a split-brain window.
+        // A floor of 3 000 ms is enforced: each tick issues up to 3 sequential statements,
+        // each with a minimum 1 s JDBC timeout, so anything below 3 s risks the tick
+        // exceeding the deadline and delaying step-down detection.
         long renewMillis = leaderElectionConfiguration.getRenewDeadline().toMillis();
-        this.queryTimeoutSeconds = Math.max(1, (int) (renewMillis / 3 / 1000));
-        // Warn if the renew deadline is below 3 s. The minimum per-statement timeout is 1 s
-        // (JDBC setQueryTimeout is in whole seconds), so up to 3 statements per tick consume
-        // up to 3 s total — exceeding the renew deadline and delaying step-down detection.
-        // Also ensure the DataSource/connection pool is configured with an acquisition timeout;
-        // pools such as Agroal wait indefinitely by default, blocking the election tick.
         if (renewMillis < 3_000) {
-            LOG.warn("renewDeadline [{}ms] is below the recommended minimum of 3 000 ms. "
-                    + "Each election tick issues up to 3 sequential DB statements, each with a "
-                    + "minimum 1 s timeout; total per-tick latency can exceed the renew deadline. "
-                    + "Recommended: renewDeadline >= 3 s. Also configure a connection-acquisition "
-                    + "timeout on the DataSource to prevent indefinite blocking.", renewMillis);
+            LOG.info("renewDeadline [{}ms] is below the minimum of 3 000 ms; adjusted to 3 000 ms. "
+                    + "Configure renewDeadline >= 3 s to avoid this adjustment.", renewMillis);
+            renewMillis = 3_000;
         }
+        this.queryTimeoutSeconds = Math.max(1, (int) (renewMillis / 3 / 1000));
+        this.autoCommitCache = null;
     }
 
 
     /**
-     * Initialize — create the leader-election table if it does not already exist.
+     * Initialize: create the leader-election table if it does not already exist.
      * Two nodes starting simultaneously are handled: if CREATE TABLE fails because another
      * node created the table concurrently, we re-check and continue normally.
      *
@@ -103,7 +103,7 @@ public class LeaderElectionDAO {
                         }
                     }
                 } catch (SQLException e) {
-                    // Concurrent creation: another node may have won the race — re-check before failing.
+                    // Concurrent creation: another node may have won the race; re-check before failing.
                     if (!existDatabaseTable(conn)) {
                         throw e;
                     }
@@ -137,12 +137,19 @@ public class LeaderElectionDAO {
      * @throws SQLException in case of a database error
      */
     private void ensureStructure(Connection conn) throws SQLException {
-        if (leaderElectionDatabaseStructure == null) {
-            String productName = conn.getMetaData().getDatabaseProductName();
-            leaderElectionDatabaseStructure = detectDatabaseStructure(productName);
-            leaderElectionConfiguration.setLeaderElectionDatabaseStructure(leaderElectionDatabaseStructure);
-            LOG.info("Auto-detected database structure: {} for '{}'.",
-                    leaderElectionDatabaseStructure.getClass().getSimpleName(), productName);
+        // Fast path: already initialised (volatile read; avoids lock acquisition on every tick).
+        if (leaderElectionDatabaseStructure != null) {
+            return;
+        }
+        // Slow path: first call or concurrent initialisation.  Double-checked locking is safe
+        // here because leaderElectionDatabaseStructure is volatile (TS-4).
+        synchronized (this) {
+            if (leaderElectionDatabaseStructure == null) {
+                String productName = conn.getMetaData().getDatabaseProductName();
+                leaderElectionDatabaseStructure = detectDatabaseStructure(productName);
+                leaderElectionConfiguration.setLeaderElectionDatabaseStructure(leaderElectionDatabaseStructure);
+                LOG.info("Auto-detected database structure: {} for '{}'.", leaderElectionDatabaseStructure.getClass().getSimpleName(), productName);
+            }
         }
     }
 
@@ -278,14 +285,14 @@ public class LeaderElectionDAO {
                 if (rs.next()) {
                     Object[] columns = JDBCUtil.getInstance().getValues(rs);
                     // columns[4] is the lease_ts epoch-millis; Oracle returns NUMBER(19) as BigDecimal
-                    // while most other drivers return Long — use Number.longValue() to handle both.
+                    // while most other drivers return Long; use Number.longValue() to handle both.
                     long leaseTs;
                     if (columns[4] instanceof Number) {
                         leaseTs = ((Number) columns[4]).longValue();
                     } else {
                         leaseTs = Long.parseLong(columns[4].toString());
                     }
-                    // columns[5] is force_release_deadline — nullable; 0 means not set.
+                    // columns[5] is force_release_deadline - nullable; 0 means not set.
                     long forceReleaseDeadline = 0L;
                     if (columns.length > 5 && columns[5] != null) {
                         if (columns[5] instanceof Number) {
@@ -314,11 +321,29 @@ public class LeaderElectionDAO {
      * @throws SQLException In case of a database error
      */
     public List<LeaderElectorRecord> selectAll() throws SQLException {
+        return selectAll(0);
+    }
+
+
+    /**
+     * Select at most {@code maxRows} stored leader election records.
+     * When {@code maxRows} is positive, {@link Statement#setMaxRows(int)} is set so the
+     * database engine stops scanning after that many rows; no full table scan for an oversized
+     * table.  Pass {@code 0} for no limit (equivalent to {@link #selectAll()}).
+     *
+     * @param maxRows maximum number of rows to return; {@code 0} means no limit
+     * @return list of leader records; never {@code null}, may be empty
+     * @throws SQLException In case of a database error
+     */
+    public List<LeaderElectorRecord> selectAll(int maxRows) throws SQLException {
         List<LeaderElectorRecord> result = new ArrayList<>();
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection()) {
             ensureStructure(conn);
             try (Statement stmt = conn.createStatement()) {
                 stmt.setQueryTimeout(queryTimeoutSeconds);
+                if (maxRows > 0) {
+                    stmt.setMaxRows(maxRows);
+                }
                 try (ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectAll())) {
                     while (rs.next()) {
                         Object[] columns = JDBCUtil.getInstance().getValues(rs);
@@ -426,7 +451,7 @@ public class LeaderElectionDAO {
 
     /**
      * Query the database server's current time and return it as epoch milliseconds.
-     * Throws {@link SQLException} if the connection or query fails — callers must handle
+     * Throws {@link SQLException} if the connection or query fails - callers must handle
      * this as a tick failure rather than falling back to the local clock, which would
      * reintroduce the node-clock-skew problem this method is designed to eliminate.
      *
@@ -483,7 +508,7 @@ public class LeaderElectionDAO {
                 columns.remove("timestamp");
                 columns.add("lease_ts");
             } catch (SQLException e) {
-                // Concurrent migration: another node may have renamed the column simultaneously — re-check before failing.
+                // Concurrent migration: another node may have renamed the column simultaneously; re-check before failing.
                 columns = getExistingColumns(conn);
                 if (!columns.contains("lease_ts")) {
                     throw e;
@@ -511,7 +536,7 @@ public class LeaderElectionDAO {
                 LOG.info("Schema migration of table {} completed (force_release_deadline added).", tableName);
                 columns.add("force_release_deadline");
             } catch (SQLException e) {
-                // Concurrent migration: another node may have added the column simultaneously — re-check before failing.
+                // Concurrent migration: another node may have added the column simultaneously; re-check before failing.
                 columns = getExistingColumns(conn);
                 if (!columns.contains("force_release_deadline")) {
                     throw e;
@@ -584,7 +609,15 @@ public class LeaderElectionDAO {
      * @throws SQLException if the commit fails
      */
     private void commitIfNeeded(Connection conn) throws SQLException {
-        if (!conn.getAutoCommit()) {
+        // Cache the auto-commit flag: it is determined by the connection pool configuration and
+        // does not change at runtime, so calling getAutoCommit() on every DML statement is
+        // redundant.  The volatile field ensures the cached value is visible across threads (P-2).
+        Boolean autoCommit = autoCommitCache;
+        if (autoCommit == null) {
+            autoCommit = conn.getAutoCommit();
+            autoCommitCache = autoCommit;
+        }
+        if (!autoCommit) {
             conn.commit();
         }
     }
@@ -611,7 +644,7 @@ public class LeaderElectionDAO {
             }
         }
 
-        // Try exact case, then uppercase (Oracle), then lowercase (PostgreSQL) — databases differ
+        // Try exact case, then uppercase (Oracle), then lowercase (PostgreSQL); databases differ
         // in how they fold unquoted identifiers in their metadata catalog.
         for (String nameToTry : new String[]{tableName, tableName.toUpperCase(), tableName.toLowerCase()}) {
             try (ResultSet rs = metaData.getTables(null, schema, nameToTry, new String[]{"TABLE"})) {

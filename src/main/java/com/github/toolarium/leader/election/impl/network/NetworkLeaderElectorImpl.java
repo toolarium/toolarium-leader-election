@@ -43,8 +43,10 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
      * failure within ~3-4 s by default, which is always less than {@code retryPeriod + 2 s}.
      */
     private static final long PHANTOM_MEMBER_STABILIZE_EXTRA_MS = 2000L;
-    private ScheduledExecutorService scheduledExecuterService;
-    private ScheduledFuture<?> scheduledFuture;
+    // volatile: written by initializeImplementation() (under lifecycleLock writeLock) and read by
+    // close() without holding any lock; volatile is required for the JMM happens-before guarantee.
+    private volatile ScheduledExecutorService scheduledExecuterService;
+    private volatile ScheduledFuture<?> scheduledFuture;
     private JChannel channel;
     private volatile long channelInitTime;
 
@@ -75,7 +77,7 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
 
         channel = createChannel();
         if (channel == null) {
-            throw new LeaderElectionException("Could not join network cluster [" + getLeaderElectionInformation().getUniqueName() + "]. Check previous log warnings for details.");
+            throw new LeaderElectionException("Could not join network cluster [" + getLeaderElectionInformation().getElectionGroupName() + "]. Check previous log warnings for details.");
         }
 
         // Record when the channel was initialised so isElectionResultDefinitive() can suppress
@@ -156,7 +158,7 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
                 // NOP
             }
             channel = null;
-            LOG.info("Exited from cluster [{}] {}.", getLeaderElectionInformation().getUniqueName(), channelName);
+            LOG.info("Exited from cluster [{}] {}.", getLeaderElectionInformation().getElectionGroupName(), channelName);
         }
     }
 
@@ -169,7 +171,7 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
     protected JChannel createChannel() {
         JChannel channel = null;
 
-        String uniqueName = getLeaderElectionInformation().getUniqueName();
+        String clusterName = getLeaderElectionInformation().getElectionGroupName();
         try {
             //log_discard_msgs
             ProtocolStackConfigurator protocolStackConfigurator = ConfiguratorFactory.getStackConfigurator(Global.DEFAULT_PROTOCOL_STACK);
@@ -202,13 +204,13 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
                     setLeader(first.equals(ch.getAddress()), "" + ch.getAddress());
                 }
             });
-            ch.connect(uniqueName);
-            LOG.info("Connected to cluster [{}] ({}).", uniqueName, ch.getAddress());
+            ch.connect(clusterName);
+            LOG.info("Connected to cluster [{}] ({}).", clusterName, ch.getAddress());
         } catch (Exception e) {
             if (LOG.isDebugEnabled()) {
-                LOG.debug("Could not join to network cluster [{}]: {}", uniqueName, e.getMessage(), e);
+                LOG.debug("Could not join to network cluster [{}]: {}", clusterName, e.getMessage(), e);
             }
-            LOG.warn("Could not join to network cluster [{}]: {}", uniqueName, e.getMessage());
+            LOG.info("Could not join to network cluster [{}]: {}, will retry on next election tick.", clusterName, e.getMessage());
         }
 
         return channel;
@@ -247,9 +249,9 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
                 setLeader(address.equals(channel.getAddress()), "" + channel.getAddress());
             } catch (Exception e) {
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug("Error occured while verify network cluster [{}]: {}", getLeaderElectionInformation().getUniqueName(), e.getMessage(), e);
+                    LOG.debug("Error occurred while verifying network cluster [{}]: {}", getLeaderElectionInformation().getUniqueName(), e.getMessage(), e);
                 }
-                LOG.warn("Error occured while verify network cluster [{}]: {}", getLeaderElectionInformation().getUniqueName(), e.getMessage());
+                LOG.info("Error occurred while verifying network cluster [{}]: {}, will retry on next election tick.", getLeaderElectionInformation().getUniqueName(), e.getMessage());
             }
         }
     }

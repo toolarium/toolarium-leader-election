@@ -25,7 +25,7 @@ public interface ILeaderElectionAdministration {
      * together with their identity and configuration settings.
      *
      * <p>For the DATABASE strategy this includes leaders held by <em>remote</em> nodes
-     * in the cluster — the records are read directly from the shared database table.
+     * in the cluster; the records are read directly from the shared database table.
      * For all other strategies only electors running in this JVM are returned.
      *
      * @return unmodifiable collection of active leader views; never {@code null}
@@ -57,7 +57,7 @@ public interface ILeaderElectionAdministration {
      * <p><b>Bound:</b> the old holder steps down within {@code retryPeriod} of the deadline
      * being written; the new leader acquires at most {@code renewDeadline} later.
      * Since {@code renewDeadline >= retryPeriod} (by configuration constraint), the new leader
-     * always acquires after the old holder has stepped down — no overlap.
+     * always acquires after the old holder has stepped down; no overlap.
      *
      * <p><b>Access control:</b> this API is intentionally unrestricted at the framework level.
      * Any code in the JVM that holds a reference to the {@link ILeaderElectionAdministration}

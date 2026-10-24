@@ -222,7 +222,7 @@ public class DatabaseElectorViewsTest {
                     "Manually inserted record must be visible before forceReleaseRemote");
             assertTrue(dbElector.forceReleaseRemote(remoteId),
                     "forceReleaseRemote must return true for a known instance id");
-            // Row is NOT deleted — force_release_deadline is set to prevent split-brain.
+            // Row is NOT deleted; force_release_deadline is set to prevent split-brain.
             // The row stays as a guard until the deadline elapses and a new node steals it.
             assertNotNull(findById(dbElector.getDatabaseElectorViews(), remoteId),
                     "Record still present after forceReleaseRemote (deadline set, row not deleted)");

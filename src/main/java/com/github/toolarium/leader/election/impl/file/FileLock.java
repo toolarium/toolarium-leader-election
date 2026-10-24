@@ -32,12 +32,17 @@ public class FileLock implements AutoCloseable {
     private String user;
     private Duration lockPeriod;
     private Duration renewDeadline;
-    private IFileLockListener fileLockListener;
+    // volatile: setFileLockListener() is called from the initialization thread while the
+    // FileLockFactory scheduler thread may concurrently read this field inside synchronized
+    // lock()/unlock()/renew().  Without volatile the scheduler thread may never see the write.
+    private volatile IFileLockListener fileLockListener;
 
-    private volatile Boolean isValid; 
-    private transient FileOutputStream outputStream;
-    private transient java.nio.channels.FileLock fileLock;
-    private transient Instant lockTime;
+    private volatile Boolean isValid;
+    // volatile so that getLockTime() / hasLock() reads from other threads always see the
+    // latest value written by the synchronized lock()/unlock()/renew() methods.
+    private volatile FileOutputStream outputStream;
+    private volatile java.nio.channels.FileLock fileLock;
+    private volatile Instant lockTime;
 
     
     /**
@@ -97,7 +102,7 @@ public class FileLock implements AutoCloseable {
      *
      * @throws FileLockException In case the lock can not be acquired.
      */
-    public void renew() throws FileLockException {
+    public synchronized void renew() throws FileLockException {
         if (LOG.isDebugEnabled()) {
             LOG.debug("Renew file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
         }
@@ -253,7 +258,7 @@ public class FileLock implements AutoCloseable {
      *
      * @throws FileLockException In case the lock can not be acquired.
      */
-    public void lock() throws FileLockException {
+    public synchronized void lock() throws FileLockException {
         // Capture the stream in a local variable so that a concurrent unlock() call
         // (which nulls this.outputStream) cannot cause a NullPointerException in the
         // catch/cleanup blocks below.
@@ -309,7 +314,7 @@ public class FileLock implements AutoCloseable {
     /**
      * Unlock
      */
-    public void unlock() {
+    public synchronized void unlock() {
         if (hasLock()) {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Release file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");

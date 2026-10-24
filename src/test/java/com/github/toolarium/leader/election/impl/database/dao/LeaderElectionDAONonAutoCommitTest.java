@@ -22,8 +22,8 @@ import org.junit.jupiter.api.Test;
  * Verifies that {@link LeaderElectionDAO} explicitly commits DML when the underlying connection
  * has {@code autoCommit=false} (Issue #10).
  *
- * <p>Connection pools configured with {@code autoCommit=false} — or connections obtained inside a
- * non-managed transaction — would silently roll back every INSERT/UPDATE when the connection is
+ * <p>Connection pools configured with {@code autoCommit=false}; or connections obtained inside a
+ * non-managed transaction; would silently roll back every INSERT/UPDATE when the connection is
  * returned to the pool unless the DAO calls {@code conn.commit()} itself.
  * The fix adds {@code commitIfNeeded(conn)} after every DML call: it calls {@code conn.commit()}
  * when {@code !conn.getAutoCommit()}.
@@ -70,7 +70,7 @@ public class LeaderElectionDAONonAutoCommitTest {
         // A fresh SELECT on a new (non-autocommit) connection must find the committed row.
         LeaderElectorRecord found = dao.selectLeaderByName("commit-group");
         assertNotNull(found,
-                "Row must be visible after insertLeader() — missing commitIfNeeded() would cause a silent rollback");
+                "Row must be visible after insertLeader(); missing commitIfNeeded() would cause a silent rollback");
         assertEquals(INST_1, found.getInstance());
     }
 
@@ -109,7 +109,7 @@ public class LeaderElectionDAONonAutoCommitTest {
         LeaderElectorRecord found = dao.selectLeaderByName("upd-group");
         assertNotNull(found);
         assertEquals(renewed.getId(), found.getId(),
-                "Renewed record id must be visible after updateLeaderTimestamp() — missing commit would leave the old id");
+                "Renewed record id must be visible after updateLeaderTimestamp(); missing commit would leave the old id");
     }
 
 
@@ -143,7 +143,7 @@ public class LeaderElectionDAONonAutoCommitTest {
         LeaderElectorRecord found = dao.selectLeaderByName("del-group");
         // null means the row was really deleted (committed); non-null means the commit was missing.
         assertEquals(null, found,
-                "Row must be gone after deleteLeaderByNameAndInstance() — missing commit would leave it visible");
+                "Row must be gone after deleteLeaderByNameAndInstance(); missing commit would leave it visible");
     }
 
 

@@ -28,7 +28,7 @@ public interface ILeaderElector extends AutoCloseable {
     /**
      * Participate in the leader election and block until the first election result is known.
      * After this method returns, {@link #isLeader()} reflects a real election result.
-     * The call is idempotent — calling it a second time returns the current leader state immediately.
+     * The call is idempotent; calling it a second time returns the current leader state immediately.
      *
      * @return {@code true} if this node is the elected leader, {@code false} otherwise
      * @throws LeaderElectionException in case of an initialization or election error
@@ -42,7 +42,7 @@ public interface ILeaderElector extends AutoCloseable {
      * the given timeout elapses.
      * After this method returns, {@link #isLeader()} reflects a real election result (if the
      * timeout did not elapse).
-     * The call is idempotent — calling it a second time returns the current leader state immediately.
+     * The call is idempotent; calling it a second time returns the current leader state immediately.
      *
      * @param timeout the maximum time to wait for the first election result; must not be {@code null}
      * @return {@code true} if this node is the elected leader, {@code false} otherwise or on timeout

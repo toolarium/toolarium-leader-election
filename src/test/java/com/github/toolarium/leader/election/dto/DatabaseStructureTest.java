@@ -92,7 +92,7 @@ public class DatabaseStructureTest {
 
 
     /**
-     * Test JDBCLeaderElectionDatabaseStructure SQL — no trailing semicolons, standard varchar.
+     * Test JDBCLeaderElectionDatabaseStructure SQL: no trailing semicolons, standard varchar.
      */
     @Test
     public void testJDBCStructure() {
@@ -149,7 +149,7 @@ public class DatabaseStructureTest {
 
 
     /**
-     * Test MySQLLeaderElectionDatabaseStructure — no index (PRIMARY KEY creates it), constraint-based PK,
+     * Test MySQLLeaderElectionDatabaseStructure: no index (PRIMARY KEY creates it), constraint-based PK,
      * ROW_FORMAT=DYNAMIC for large varchar primary key.
      */
     @Test
@@ -170,7 +170,7 @@ public class DatabaseStructureTest {
 
 
     /**
-     * Test MariaDBLeaderElectionDatabaseStructure — inherits from MySQL structure.
+     * Test MariaDBLeaderElectionDatabaseStructure: inherits from MySQL structure.
      */
     @Test
     public void testMariaDBStructure() {
@@ -189,7 +189,7 @@ public class DatabaseStructureTest {
 
 
     /**
-     * Test OracleLeaderElectionDatabaseStructure — VARCHAR2, no index, constraint name truncated to fit
+     * Test OracleLeaderElectionDatabaseStructure: VARCHAR2, no index, constraint name truncated to fit
      * Oracle's 30-character identifier limit.
      */
     @Test
@@ -250,7 +250,7 @@ public class DatabaseStructureTest {
 
 
     /**
-     * Test SQLServerLeaderElectionDatabaseStructure — nvarchar type.
+     * Test SQLServerLeaderElectionDatabaseStructure: nvarchar type.
      */
     @Test
     public void testSQLServerStructure() {
@@ -270,7 +270,7 @@ public class DatabaseStructureTest {
 
     /**
      * Test that the database structure is null by default (auto-detected on first connection),
-     * and that JDBCLeaderElectionDatabaseStructure — the auto-detected default for generic JDBC databases —
+     * and that JDBCLeaderElectionDatabaseStructure, the auto-detected default for generic JDBC databases,
      * does not emit trailing semicolons that would fail on most JDBC drivers.
      */
     @Test
@@ -280,7 +280,7 @@ public class DatabaseStructureTest {
         assertNull(config.getLeaderElectionDatabaseStructure(),
                 "Structure must be null before first connection (auto-detected by the DAO on init)");
 
-        // Verify JDBCLeaderElectionDatabaseStructure — the fallback auto-detected for H2/PostgreSQL/ANSI-SQL —
+        // Verify JDBCLeaderElectionDatabaseStructure, the fallback auto-detected for H2/PostgreSQL/ANSI-SQL,
         // does not emit trailing semicolons (the base class does, which breaks most JDBC drivers)
         JDBCLeaderElectionDatabaseStructure s = new JDBCLeaderElectionDatabaseStructure();
         assertTrue(!s.createSQLTable().endsWith(SEMICOLON), "Default SQL must not end with semicolon");
@@ -289,7 +289,7 @@ public class DatabaseStructureTest {
 
 
     /**
-     * Test that a caller-supplied structure is not overwritten by validate() — the unconditional
+     * Test that a caller-supplied structure is not overwritten by validate(), the unconditional
      * assignment bug that silently reverted any configured structure to the base class default.
      */
     @Test

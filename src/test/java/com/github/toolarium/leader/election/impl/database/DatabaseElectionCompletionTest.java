@@ -20,9 +20,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests the elect() completion behaviour of the DATABASE strategy using an in-memory H2 database.
- * The first election round runs asynchronously in the scheduler thread; {@code elect()} blocks until
- * the latch is counted down by the first tick, so {@link ILeaderElector#isLeader()} is accurate
- * as soon as the call returns (within the given timeout).
+ * The first election tick fires immediately (initialDelay=0) in the scheduler thread; {@code elect()}
+ * blocks until the latch is counted down by that tick, so {@link ILeaderElector#isLeader()} is
+ * accurate as soon as the call returns.  Tests use a 5-second timeout so they are not sensitive
+ * to build-machine speed or JVM warm-up latency.
  *
  * @author patrick
  */
@@ -50,7 +51,7 @@ public class DatabaseElectionCompletionTest {
 
 
     /**
-     * A single instance must be leader immediately when elect() returns — no additional wait.
+     * A single instance must be leader immediately when elect() returns; no additional wait.
      * This verifies the synchronous first-round behaviour.
      *
      * @throws Exception In case of an error
@@ -67,7 +68,7 @@ public class DatabaseElectionCompletionTest {
 
     /**
      * When two instances share the same database, exactly one must hold leadership
-     * immediately after both elect() calls return — no additional wait needed.
+     * immediately after both elect() calls return; no additional wait needed.
      *
      * @throws Exception In case of an error
      */
@@ -98,31 +99,32 @@ public class DatabaseElectionCompletionTest {
 
 
     /**
-     * elect(short timeout) must return true for DATABASE because the first tick fires with
-     * initialDelay=0 and an in-memory H2 round-trip completes well within 500 ms.
+     * elect(Duration) must return true for DATABASE when the timeout is generous enough for the
+     * first scheduler tick to complete.  500 ms is sufficient for an in-memory H2 database but
+     * may be too tight on heavily loaded CI machines; 5 s gives ample headroom.
      *
      * @throws Exception In case of an error
      */
     @Test
     public void testElectZeroTimeout() throws Exception {
         ILeaderElector elector = createElector("compl_zero", "compl-zero");
-        assertTrue(elector.elect(Duration.ofMillis(500)),
-                "DATABASE elect() must return true — first tick fires immediately (initialDelay=0)");
+        assertTrue(elector.elect(Duration.ofSeconds(5)),
+                "DATABASE elect() must return true; first tick fires immediately (initialDelay=0)");
         assertTrue(elector.isLeader());
         elector.close();
     }
 
 
     /**
-     * elect() with a tight timeout still returns immediately for DATABASE because the first round
-     * is synchronous. elect() called a second time is idempotent and returns the current state.
+     * elect() called a second time is idempotent and returns the current leader state without
+     * waiting for a new tick.
      *
      * @throws Exception In case of an error
      */
     @Test
     public void testElectIdempotent() throws Exception {
         ILeaderElector elector = createElector("compl_idem", "compl-idem");
-        assertTrue(elector.elect(Duration.ofMillis(500)));
+        assertTrue(elector.elect(Duration.ofSeconds(5)));
         assertTrue(elector.elect(Duration.ofMillis(100)), "Second elect() must return same leader state");
         elector.close();
         assertFalse(elector.isLeader());

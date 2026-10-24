@@ -87,7 +87,7 @@ public final class LeaderElectionFactory {
     /**
      * Create a fluent builder for configuring and constructing a leader elector.
      *
-     * <p>Usage (step 1 — common identity and timing, step 2 — strategy-specific options):
+     * <p>Usage (step 1 - common identity and timing, step 2 - strategy-specific options):
      * <pre>
      *     // FILE
      *     ILeaderElector e = LeaderElectionFactory.builder()
@@ -213,9 +213,9 @@ public final class LeaderElectionFactory {
      * @author patrick
      */
     public static final class Builder {
-        private String namespace = "";
-        private String name = "";
-        private String identity = "";
+        private String namespace = null;
+        private String name = null;
+        private String identity = null;
         private String username;
         private Duration timeout;
         private Duration renewDeadline;
@@ -224,7 +224,7 @@ public final class LeaderElectionFactory {
 
 
         /**
-         * Constructor (package-private — use {@link LeaderElectionFactory#builder()})
+         * Constructor (package-private; use {@link LeaderElectionFactory#builder()})
          */
         private Builder() {
             // NOP
@@ -238,11 +238,7 @@ public final class LeaderElectionFactory {
          * @return this builder
          */
         public Builder namespace(String namespace) {
-            if (namespace != null) {
-                this.namespace = namespace;
-            } else {
-                this.namespace = "";
-            }
+            this.namespace = namespace;
             return this;
         }
 
@@ -254,11 +250,7 @@ public final class LeaderElectionFactory {
          * @return this builder
          */
         public Builder name(String name) {
-            if (name != null) {
-                this.name = name;
-            } else {
-                this.name = "";
-            }
+            this.name = name;
             return this;
         }
 
@@ -270,11 +262,7 @@ public final class LeaderElectionFactory {
          * @return this builder
          */
         public Builder identity(String identity) {
-            if (identity != null) {
-                this.identity = identity;
-            } else {
-                this.identity = "";
-            }
+            this.identity = identity;
             return this;
         }
 

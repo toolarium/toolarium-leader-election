@@ -42,7 +42,7 @@ public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderE
     protected void initializeImplementation() throws LeaderElectionException {
         FileLeaderElectionConfiguration.createBasePath(null);
         String basePath = getLeaderElectionConfiguration().getBasePath();
-        File file = new File(basePath + getLeaderElectionInformation().getUniqueName().trim() + ".lock");
+        File file = new File(basePath + getLeaderElectionInformation().getElectionGroupName().trim() + ".lock");
         fileLock = FileLockFactory.getInstance().tryLock(file, getLeaderElectionConfiguration().getTimeout(), getLeaderElectionConfiguration().getRenewDeadline());
         
         // in case we got the lock we set the listener

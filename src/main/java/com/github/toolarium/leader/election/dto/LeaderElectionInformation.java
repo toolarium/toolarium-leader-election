@@ -6,6 +6,7 @@
 package com.github.toolarium.leader.election.dto;
 
 import java.util.Objects;
+import java.util.UUID;
 
 
 /**
@@ -29,7 +30,11 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
     public LeaderElectionInformation(String namespace, String name, String identity) {
         this.namespace = namespace;
         this.name = name;
-        this.identity = identity;
+        if (identity != null && !identity.isBlank()) {
+            this.identity = identity;
+        } else {
+            this.identity = UUID.randomUUID().toString();
+        }
         this.username = System.getProperty("user.name");
     }
 
@@ -37,10 +42,10 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
     /**
      * Constructor for LeaderElectionInformation
      *
-     * @param identity the identity
+     * @param name the election group name
      */
-    public LeaderElectionInformation(String identity) {
-        this("", "", identity);
+    public LeaderElectionInformation(String name) {
+        this(null, name, null);
     }
     
     

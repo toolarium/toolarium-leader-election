@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,6 +30,11 @@ import org.slf4j.LoggerFactory;
  */
 public final class LeaderElectionScheduler {
     private static final Logger LOG = LoggerFactory.getLogger(LeaderElectionScheduler.class);
+    // Hard cap on the total time spent in cleanupLeaderElectors() during JVM shutdown.
+    // Each elector's close() already has its own closeTimeout; with many electors registered
+    // the sequential sum can exceed the JVM's implicit shutdown-hook time budget, causing the
+    // JVM to kill the hook thread before all rows are deleted (RES-4).
+    private static final long SHUTDOWN_CLEANUP_TIMEOUT_SECONDS = 30L;
     private final Set<ILeaderElector> leaderElectors;
 
 
@@ -110,7 +116,7 @@ public final class LeaderElectionScheduler {
         for (ILeaderElector elector : snapshot) {
             if (elector instanceof DatabaseLeaderElectorImpl) {
                 // DATABASE: the table is the authoritative state and already covers remote nodes.
-                // Do NOT mix in the local isLeader() state — the DB view is the single source of truth.
+                // Do NOT mix in the local isLeader() state; the DB view is the single source of truth.
                 result.addAll(((DatabaseLeaderElectorImpl) elector).getDatabaseElectorViews());
             } else if (elector.isLeader() && elector instanceof ILeaderElectorView) {
                 // FILE / NETWORK / KUBERNETES: use the local elector's known state.
@@ -160,10 +166,20 @@ public final class LeaderElectionScheduler {
 
     /**
      * Close all registered leader electors on JVM shutdown.
+     * A hard deadline of {@value #SHUTDOWN_CLEANUP_TIMEOUT_SECONDS} seconds guards the total
+     * cleanup time: sequential close() calls each block for up to their own closeTimeout, so
+     * without a cap a large number of registered electors can exceed the JVM's implicit
+     * shutdown-hook time budget and cause the hook thread to be killed prematurely.
      */
     private void cleanupLeaderElectors() {
         // Snapshot to avoid ConcurrentModificationException since close() calls unregister().
-        for (ILeaderElector leaderElector : leaderElectors.toArray(new ILeaderElector[0])) {
+        ILeaderElector[] snapshot = leaderElectors.toArray(new ILeaderElector[0]);
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(SHUTDOWN_CLEANUP_TIMEOUT_SECONDS);
+        for (ILeaderElector leaderElector : snapshot) {
+            if (System.nanoTime() > deadlineNanos) {
+                LOG.info("Shutdown cleanup deadline reached; remaining leader elector(s) will expire naturally after the configured timeout.");
+                break;
+            }
             try {
                 if (leaderElector.isLeader()) {
                     if (LOG.isDebugEnabled()) {
@@ -172,7 +188,7 @@ public final class LeaderElectionScheduler {
                 }
                 leaderElector.close();
             } catch (Exception e) {
-                LOG.warn("Leader elector [{}] could not be closed on shutdown: {}", leaderElector.getId(), e.getMessage());
+                LOG.info("Leader elector [{}] could not be closed on shutdown: {}, no action required, JVM is exiting.", leaderElector.getId(), e.getMessage());
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Error detail:", e);
                 }

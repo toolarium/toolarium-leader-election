@@ -48,7 +48,7 @@ public class KubernetesLeaderElectotionTest extends AbstractLeaderElectorTest {
 
 
     /**
-     * Tear down the test — reset singleton state modified during tests.
+     * Tear down the test; reset singleton state modified during tests.
      */
     @AfterEach
     public void tearDown() {

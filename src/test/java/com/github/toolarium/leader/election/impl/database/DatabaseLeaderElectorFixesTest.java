@@ -109,7 +109,7 @@ public class DatabaseLeaderElectorFixesTest {
 
     /**
      * Verify that the scheduler steps down as leader when the nanoTime elapsed since the last
-     * successful DB renewal exceeds the renew deadline — before any DB call is attempted.
+     * successful DB renewal exceeds the renew deadline; before any DB call is attempted.
      * This guards against GC-pause / thread-starvation scenarios where the scheduler tick
      * fires late: the node must step down rather than holding a potentially expired lease.
      *
@@ -127,7 +127,7 @@ public class DatabaseLeaderElectorFixesTest {
         ds.setPassword("");
 
         // retryPeriod=1 s; renewDeadline=3 s; timeout=5 s.
-        // Validation (uses toSeconds): 5 > 3 >= 1 — all valid.
+        // Validation (uses toSeconds): 5 > 3 >= 1; all valid.
         DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(
                 Duration.ofSeconds(5), Duration.ofSeconds(3), Duration.ofSeconds(1));
         config.setDataSource(ds);
@@ -165,8 +165,8 @@ public class DatabaseLeaderElectorFixesTest {
      *
      * <p>Configuration: renewDeadline = 1 s, retryPeriod = 500 ms.
      * The {@link FailableDataSource} sleeps 600 ms before failing.
-     * At tick time elapsed ≈ 500 ms (&lt;= 1000 ms) — pre-tick guard does NOT fire.
-     * After the 600 ms hang, elapsed ≈ 1100 ms &gt; 1000 ms — in-catch guard fires.
+     * At tick time elapsed ≈ 500 ms (&lt;= 1000 ms); pre-tick guard does NOT fire.
+     * After the 600 ms hang, elapsed ≈ 1100 ms &gt; 1000 ms; in-catch guard fires.
      *
      * @throws Exception in case of an error
      */
@@ -177,7 +177,7 @@ public class DatabaseLeaderElectorFixesTest {
         h2.setUser("sa");
         h2.setPassword("");
         FailableDataSource fds = new FailableDataSource(h2, 600L);
-        // toSeconds() truncation: 3 > 1 >= 0 — valid.
+        // toSeconds() truncation: 3 > 1 >= 0; valid.
         DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(
                 Duration.ofSeconds(3), Duration.ofSeconds(1), Duration.ofMillis(500));
         config.setDataSource(fds);
@@ -204,7 +204,7 @@ public class DatabaseLeaderElectorFixesTest {
 
     /**
      * Verify that when the leader calls {@code close()}, the DB row is deleted promptly
-     * so the standby can take over on its very next tick — without waiting for the full
+     * so the standby can take over on its very next tick; without waiting for the full
      * lease timeout to elapse.
      * This also implicitly validates the ordering: {@code super.close()} (interrupt tasks)
      * runs before the DB deletion so no window exists where the row is gone but a task
@@ -246,7 +246,7 @@ public class DatabaseLeaderElectorFixesTest {
      * The DB row must NOT be deleted until {@code close()} has stopped all running tasks
      * (via {@code super.close()}, which drains the lifecycle read-lock first).
      * If the row were deleted before the tasks stopped, the standby would win the DB
-     * election while the leader's task is still executing — a split-brain window.
+     * election while the leader's task is still executing; a split-brain window.
      *
      * @throws Exception in case of an error
      */
@@ -274,7 +274,7 @@ public class DatabaseLeaderElectorFixesTest {
                     releaseTask.await();
                 });
             } catch (Exception ignored) {
-                // task may be interrupted by electorA.close() — intentionally ignored
+                // task may be interrupted by electorA.close(); intentionally ignored
             }
         }, "order-safety-task");
         taskThread.start();
@@ -330,7 +330,7 @@ public class DatabaseLeaderElectorFixesTest {
                         "force-release-group", deadInstanceId, "remote-user");
         assertEquals(1, directDAO.insertLeader(deadRow));
 
-        // Create electorB — the "admin" elector that will force-release the dead leader.
+        // Create electorB; the "admin" elector that will force-release the dead leader.
         // elect() initializes B's DAO; it returns false because the dead leader's row is still fresh.
         ILeaderElector electorB = createElector(ds, "force-release-group", 2);
         assertFalse(electorB.elect(Duration.ofMillis(600)),
@@ -357,7 +357,7 @@ public class DatabaseLeaderElectorFixesTest {
 
     /**
      * Verify that when the synchronous first election round in {@code initializeImplementation()}
-     * fails with a DB error, {@code elect()} still returns {@code false} promptly — it must not
+     * fails with a DB error, {@code elect()} still returns {@code false} promptly; it must not
      * block on the internal {@code CountDownLatch} forever.
      *
      * @throws Exception in case of an error
@@ -507,7 +507,7 @@ public class DatabaseLeaderElectorFixesTest {
      *   <li>A's nanoTime-based renewal timestamp is made to look stale so the pre-tick guard
      *       steps A down locally on the next scheduler tick.</li>
      *   <li>On the following tick, A must detect that its own expired row is re-acquirable
-     *       and become leader again — without requiring a restart.</li>
+     *       and become leader again; without requiring a restart.</li>
      * </ol>
      * Prior to the fix, step 4 looped forever: {@code handleOwnLeaderTick()} found the own
      * row, confirmed {@code !isLeader()}, cleared {@code currentLeaderRecordId}, and returned
@@ -633,7 +633,7 @@ public class DatabaseLeaderElectorFixesTest {
      *
      * <p>The race: after the task returns, the monitor may still hold a reference to the
      * lease from a previous snapshot iteration, call {@code isValid()==false}, and invoke
-     * {@code interruptIfRunning()} — hitting the caller thread while it is already in the
+     * {@code interruptIfRunning()}; hitting the caller thread while it is already in the
      * <em>next</em> unrelated job.  The fix adds a {@code finished} flag set inside the
      * same {@code synchronized(lease)} block that inspects the interrupt status, making
      * {@code interruptIfRunning()} a no-op once the task is done.
@@ -676,7 +676,7 @@ public class DatabaseLeaderElectorFixesTest {
 
 
     // -----------------------------------------------------------------------
-    // Issue 5 (new): nanoTime Long.MIN_VALUE sentinel — step-down guard must
+    // Issue 5 (new): nanoTime Long.MIN_VALUE sentinel; step-down guard must
     // not fire when lastRenewalNanos is NANOS_NOT_SET.
     // -----------------------------------------------------------------------
 
@@ -713,12 +713,12 @@ public class DatabaseLeaderElectorFixesTest {
                 LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("nano-sentinel-group"), config);
         assertTrue(elector.elect());
 
-        // Inject NANOS_NOT_SET = Long.MIN_VALUE — should NOT trigger the guard.
+        // Inject NANOS_NOT_SET = Long.MIN_VALUE; should NOT trigger the guard.
         Field f = elector.getClass().getDeclaredField("lastRenewalNanos");
         f.setAccessible(true);
         f.setLong(elector, Long.MIN_VALUE);
 
-        Thread.sleep(1_500L); // two retryPeriods — enough for a tick to run
+        Thread.sleep(1_500L); // two retryPeriods; enough for a tick to run
         assertTrue(elector.isLeader(),
                 "Guard must not fire when lastRenewalNanos == Long.MIN_VALUE (NANOS_NOT_SET sentinel)");
 
@@ -730,7 +730,7 @@ public class DatabaseLeaderElectorFixesTest {
         //   T - (-1) = T + 1  → if T > renewDeadline.toNanos()-1 it fires.
         // For a typical JVM the nanoTime is in the billions of nanoseconds, >> 6s.
         // So setting it to -1 (not NANOS_NOT_SET) should trigger the guard.
-        f.setLong(elector, -1L); // valid negative nanoTime — NOT the sentinel
+        f.setLong(elector, -1L); // valid negative nanoTime; NOT the sentinel
 
         awaitCondition(() -> !elector.isLeader(), 2_500L);
         assertFalse(elector.isLeader(),
@@ -768,7 +768,7 @@ public class DatabaseLeaderElectorFixesTest {
                 LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("wall-clock-skew-group"), config);
         assertTrue(elector.elect());
 
-        // Reset lastRenewalNanos to now — simulates a fresh renewal so the renew-deadline
+        // Reset lastRenewalNanos to now; simulates a fresh renewal so the renew-deadline
         // guard must not fire. The (removed) wall-clock field lastSuccessfulRenewalAt no
         // longer exists; the guard is now purely nanoTime-based.
         Field nanosField = elector.getClass().getDeclaredField("lastRenewalNanos");
@@ -785,7 +785,7 @@ public class DatabaseLeaderElectorFixesTest {
 
 
     // -----------------------------------------------------------------------
-    // Issue 5 (new): allowDdl=false — fail-fast instead of silent DDL execution.
+    // Issue 5 (new): allowDdl=false; fail-fast instead of silent DDL execution.
     // -----------------------------------------------------------------------
 
     /**

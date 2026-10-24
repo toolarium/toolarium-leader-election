@@ -82,7 +82,7 @@ public final class JDBCUtil {
                 // clear warnings
                 stmnt.clearWarnings();
             } catch (SQLException e) {
-                LOG.warn(SQLFormatterUtil.getInstance().formatSQLException("Could not print and clear SQL warnings", e));
+                LOG.info(SQLFormatterUtil.getInstance().formatSQLException("Could not print and clear SQL warnings, no action required", e));
             }
 
             try {
@@ -119,7 +119,7 @@ public final class JDBCUtil {
                     // clear warnings
                     conn.clearWarnings();
                 } catch (SQLException e) {
-                    LOG.warn(SQLFormatterUtil.getInstance().formatSQLException("Could not print and clear SQL warnings", e));
+                    LOG.info(SQLFormatterUtil.getInstance().formatSQLException("Could not print and clear SQL warnings, no action required", e));
                 }
 
                 conn.close();

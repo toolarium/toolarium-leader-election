@@ -144,7 +144,7 @@ public abstract class AbstractDatabaseLeaderElectorTest extends AbstractLeaderEl
      * @return DDL string (no trailing semicolon)
      */
     protected String legacyTableDDL(String tableName) {
-        // Double-quote "timestamp" — required in H2 (reserved keyword) and exact in PostgreSQL
+        // Double-quote "timestamp"; required in H2 (reserved keyword) and exact in PostgreSQL
         return "CREATE TABLE " + tableName
                 + "(id varchar(36) not NULL, name varchar(512) not NULL, "
                 + "instance varchar(255), username varchar(255), \"timestamp\" bigint not NULL, "

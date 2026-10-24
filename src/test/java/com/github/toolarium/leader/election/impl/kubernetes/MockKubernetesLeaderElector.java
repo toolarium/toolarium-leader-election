@@ -94,7 +94,7 @@ public final class MockKubernetesLeaderElector {
 
 
         /**
-         * Constructor (package-private — use {@link MockKubernetesLeaderElector#builder()})
+         * Constructor (package-private; use {@link MockKubernetesLeaderElector#builder()})
          */
         private Builder() {
             // NOP
