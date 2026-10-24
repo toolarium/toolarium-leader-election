@@ -789,7 +789,7 @@ public class DatabaseLeaderElectorFixesTest {
     // -----------------------------------------------------------------------
 
     /**
-     * Verify that with {@code allowDdl=false}, calling {@code elect()} when the
+     * Verify that with {@code allowDdl=false}, calling {@code getLeaderElection()} when the
      * leader-election table does not yet exist throws a descriptive
      * {@link LeaderElectionException} naming the table and mentioning {@code allowDdl=false},
      * instead of silently executing {@code CREATE TABLE}.
@@ -807,11 +807,10 @@ public class DatabaseLeaderElectorFixesTest {
         config.setDataSource(ds);
         config.setAllowDdl(false); // DDL forbidden
 
-        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(
-                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("no-ddl-group"), config);
-
-        LeaderElectionException ex = assertThrows(LeaderElectionException.class, elector::elect,
-                "elect() must throw when table is missing and allowDdl=false");
+        LeaderElectionException ex = assertThrows(LeaderElectionException.class,
+                () -> LeaderElectionFactory.getInstance().getLeaderElection(
+                        LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("no-ddl-group"), config),
+                "getLeaderElection() must throw when table is missing and allowDdl=false");
         String msg = ex.getMessage();
         if (ex.getCause() != null) {
             msg = msg + " " + ex.getCause().getMessage();

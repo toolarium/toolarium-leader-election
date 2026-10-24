@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -76,7 +75,12 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     private volatile long backoffUntil;
     private volatile long lastRenewalNanos;
     private volatile long dbClockOffsetMillis;
+    // lastClockSyncAt: concurrency guard — set optimistically before the DB call, reset to 0 on
+    // failure so the next tick retries. Does NOT represent a successful sync (Finding 4).
     private volatile long lastClockSyncAt;
+    // lastSuccessfulClockSyncAt: records the wall-clock time of the last successful DB clock sync.
+    // Used for the staleness bound and to distinguish "never synced" from "failed retry" in logs.
+    private volatile long lastSuccessfulClockSyncAt;
     // AtomicBoolean so close() is idempotent under concurrent calls (e.g. app shutdown + JVM hook).
     private final AtomicBoolean closing;
     // Monotonically increasing session counter. Incremented by close() so that a DatabaseElectionHandler from the previous session (still blocked in a DB call) can
@@ -85,6 +89,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     // Set to true once leaderElectionDAO.init() succeeds; guards the DELETE in close() so that electors whose elect() was never called (or whose init failed, e.g. allowDdl=false with a
     // missing table) do not emit a noisy INFO log when close() finds no table to delete from.
     private volatile boolean daoReady;
+    // Set to true once the schema has been initialised (by the factory at build time or by the
+    // first initializeImplementation() call). Reset by close() so that re-election after close
+    // re-validates and re-migrates the schema if needed.
+    private final AtomicBoolean schemaReady = new AtomicBoolean(false);
     // Dedicated lock for dbClockOffsetMillis / lastClockSyncAt so that getDbNow() (which may execute a DB round-trip) does not block threads waiting for
     // synchronized(this), e.g. close() calling signalLeaderInvalid().
     private final Object clockSyncLock = new Object();
@@ -92,7 +100,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     // -----------------------------------------------------------------------
     // Lock acquisition order: MUST be respected to prevent deadlock:
     //   1. lifecycleLock (writeLock or readLock): AbstractLeaderElectorImpl
-    //   2. synchronized(this): intrinsic lock used by setLeader(), signalLeaderInvalid(), extendLeaseNow(), and the session-check blocks in DatabaseElectionHandler / handleOwnLeaderTick()
+    //   2. synchronized(this): intrinsic lock used by setLeader(), signalLeaderInvalid(), doDbExtendLease(), and the session-check blocks in DatabaseElectionHandler / handleOwnLeaderTick()
     //   3. clockSyncLock: guards dbClockOffsetMillis / lastClockSyncAt only; MUST NOT be acquired while holding synchronized(this) or lifecycleLock
     // -----------------------------------------------------------------------
 
@@ -114,9 +122,33 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         this.lastRenewalNanos = NANOS_NOT_SET;
         this.dbClockOffsetMillis = 0;
         this.lastClockSyncAt = 0;
+        this.lastSuccessfulClockSyncAt = 0;
         this.closing = new AtomicBoolean(false);
         this.sessionCounter = new AtomicInteger(0);
         this.daoReady = false;
+    }
+
+
+    /**
+     * Initialise the database schema (CREATE TABLE, migrations). Idempotent: subsequent calls
+     * before {@link #close()} are no-ops. Called automatically by the factory at build time so
+     * schema errors surface immediately rather than on the first {@link #elect()} call.
+     * {@link #initializeImplementation()} also calls this method so that electors created outside
+     * the factory (e.g. in tests) are handled correctly, and to cover the re-election case after
+     * {@link #close()} has reset the flag.
+     *
+     * @throws LeaderElectionException if schema creation or migration fails
+     */
+    public void initializeSchema() throws LeaderElectionException {
+        if (schemaReady.get()) {
+            return;
+        }
+        try {
+            leaderElectionDAO.init();
+            schemaReady.set(true);
+        } catch (SQLException e) {
+            throw new LeaderElectionException("Could not prepare database for leader election: " + e.getMessage(), e);
+        }
     }
 
 
@@ -129,21 +161,18 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         closing.set(false);
         daoReady = false;                 // reset until init() succeeds below
         lastClockSyncAt = 0;              // force a fresh DB clock sync on (re-)initialization
+        lastSuccessfulClockSyncAt = 0;    // reset so staleness bound starts fresh
         lastRenewalNanos = NANOS_NOT_SET; // reset nanoTime sentinel so step-down guards are fresh
         backoffUntil = NANOS_NOT_SET;     // reset backoff on re-initialization
         consecutiveFailures = 0;          // reset failure count so log level and backoff start fresh
 
         LeaderElectionInformation info = getLeaderElectionInformation();
-        if (info.getName() == null || info.getName().trim().isEmpty()) {
+        if (info.getName() == null || info.getName().isBlank()) {
             throw new LeaderElectionException("LeaderElectionInformation.name must not be blank; set it via Builder.name(\"your-app\").");
         }
 
-        try {
-            leaderElectionDAO.init();
-            daoReady = true;
-        } catch (SQLException e) {
-            throw new LeaderElectionException("Could not prepare database for leader election: " + e.getMessage(), e);
-        }
+        initializeSchema();  // idempotent: no-op if already called by the factory at build time
+        daoReady = true;
 
         String electionGroupName = getLeaderElectionInformation().getElectionGroupName();
         ThreadFactory daemonFactory = runnable -> {
@@ -163,17 +192,12 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
     /**
      * @see com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl#extendLeaseNow()
-     *
-     * <p>The DB write is submitted to the scheduler thread so that the renewal connection is
-     * borrowed outside any active JTA transaction on the caller's thread. This allows
-     * {@link com.github.toolarium.leader.election.ILeaderLease#tryExtend()} to be safely called
-     * from within a container-managed ({@code @Transactional}) method without the DataSource
-     * returning a JTA-enlisted connection or {@code commitIfNeeded()} committing the caller's
-     * transaction early.
-     *
-     * <p>{@link #runAsExtension(Callable)} is invoked on the scheduler thread so that the
-     * {@code extendingInProgress} ThreadLocal is set on the same thread that calls
-     * {@link #setLeader(Boolean, String)}, keeping the leadership-term counter correct.
+     *     The DB write is submitted to the scheduler thread so that the renewal connection is
+     *     borrowed outside any active JTA transaction on the caller's thread, allowing
+     *     tryExtend() to be safely called from within a container-managed transaction.
+     *     runAsExtension() is invoked on the scheduler thread so that the extendingInProgress
+     *     ThreadLocal is set on the same thread that calls setLeader(), keeping the
+     *     leadership-term counter correct.
      */
     @Override
     protected boolean extendLeaseNow() throws LeaderElectionException {
@@ -181,7 +205,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         if (ses == null || ses.isShutdown()) {
             return false;
         }
-        long timeoutMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
+        // Budget = 2 × renewDeadline: one renewDeadline for a possibly in-progress tick to
+        // finish (a tick runs up to 3 statements each bounded to renewDeadline/3), plus one
+        // renewDeadline for the extension's own DB call (P-3).
+        long timeoutMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis() * 2;
         Future<Boolean> future;
         try {
             future = ses.submit(() -> runAsExtension(this::doDbExtendLease));
@@ -191,11 +218,17 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         try {
             return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
+            // Interrupted (e.g. the lease monitor signalled leadership loss while waiting):
+            // restore the flag and return false per the ILeaderLease.tryExtend() contract
+            // ("false if the extension failed or leadership was already lost").
             Thread.currentThread().interrupt();
-            throw new LeaderElectionException("Lease extension interrupted");
+            return false;
         } catch (TimeoutException e) {
-            future.cancel(true);
-            throw new LeaderElectionException("Lease extension timed out after " + timeoutMillis + "ms");
+            // Scheduler was busy (tick in progress); the extension did not complete within
+            // 2 × renewDeadline. Return false per contract instead of throwing (Finding 3).
+            // cancel(false): do not interrupt the scheduler thread (RES-2).
+            future.cancel(false);
+            return false;
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof LeaderElectionException) {
@@ -389,6 +422,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             // this close() and a future elect() call.  initializeImplementation() sets it
             // back to true once init() succeeds, so re-election is unaffected.
             daoReady = false;
+            // Reset schemaReady so that a future elect() after close() re-validates and
+            // re-migrates the schema. initializeSchema() sets it back to true on success.
+            schemaReady.set(false);
 
             leaderElectionDAO.close();
         }
@@ -422,7 +458,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             for (LeaderElectorRecord record : records) {
                 views.add(new DatabaseRecordView(record));
             }
-            return Collections.unmodifiableList(new ArrayList<>(views));
+            return Collections.unmodifiableList(views);
         } catch (Exception e) {
             LOG.info("Could not query stored leader records: {}, no action required, result will be retried on next request.", e.getMessage());
             return Collections.emptyList();
@@ -456,7 +492,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * @throws IllegalArgumentException if {@code instanceId} is null or blank
      */
     public boolean forceReleaseRemote(String instanceId) {
-        if (instanceId == null || instanceId.trim().isEmpty()) {
+        if (instanceId == null || instanceId.isBlank()) {
             throw new IllegalArgumentException("instanceId must not be null or blank");
         }
         try {
@@ -728,42 +764,44 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             stalenessThresholdMs = Long.MAX_VALUE;
         }
 
-        // Read the sync timestamp under the lock, then perform the DB call outside it so
+        // Read the sync timestamps under the lock, then perform the DB call outside it so
         // that a blocked DB round-trip never prevents close()/signalLeaderInvalid() from
         // acquiring synchronized(this).
         boolean needsRefresh;
-        boolean isFirstSync;
+        boolean everSynced;
         synchronized (clockSyncLock) {
-            isFirstSync = lastClockSyncAt == 0;
-            needsRefresh = isFirstSync || now - lastClockSyncAt > refreshThresholdMs;
+            // needsRefresh uses lastClockSyncAt (concurrency guard): 0 means no refresh is
+            // currently claimed; non-zero means one is in flight or recently completed.
+            needsRefresh = lastClockSyncAt == 0 || now - lastClockSyncAt > refreshThresholdMs;
+            // everSynced uses lastSuccessfulClockSyncAt: only set after a DB call succeeds.
+            // This separates "has a sync ever worked" from "is a sync currently in flight".
+            everSynced = lastSuccessfulClockSyncAt != 0;
             if (needsRefresh) {
                 // Claim the refresh slot optimistically so concurrent callers (e.g. the
                 // scheduler thread and a runIfLeader caller in extendLeaseNow()) that both
                 // see needsRefresh=true do not each issue a redundant DB round-trip (TS-1).
-                // On DB failure lastClockSyncAt is reset to 0 so the next tick can retry.
+                // On DB failure lastClockSyncAt is reset to 0 so the next tick retries.
                 lastClockSyncAt = now;
             }
         }
         if (needsRefresh) {
             try {
                 long dbNow = leaderElectionDAO.getDatabaseCurrentTimeMillis();
-                // Write fields back under the lock; use the pre-call `now` so that
-                // lastClockSyncAt reflects when the refresh was initiated (consistent with
-                // the optimistic write above).
                 synchronized (clockSyncLock) {
                     dbClockOffsetMillis = dbNow - now;
                     lastClockSyncAt = now;
+                    lastSuccessfulClockSyncAt = now;
                 }
                 return dbNow;
             } catch (Exception e) {
                 synchronized (clockSyncLock) {
-                    // Reset so the next tick can attempt the refresh. Without this reset
-                    // the optimistic lastClockSyncAt=now would suppress all further refresh
-                    // attempts within the refresh window even though no successful sync
-                    // has occurred, leaving an arbitrarily stale offset in effect.
+                    // Reset concurrency guard so the next tick can attempt the refresh.
                     lastClockSyncAt = 0;
+                    // lastSuccessfulClockSyncAt is NOT touched: the staleness bound and the
+                    // "initial vs retry" log decision must reflect the last successful sync,
+                    // not the failed attempt (Finding 4).
                 }
-                if (!isFirstSync) {
+                if (everSynced) {
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("Could not refresh DB clock offset for [{}], using stale offset: {}",
                                 getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
@@ -776,14 +814,13 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         }
 
         synchronized (clockSyncLock) {
-            // Staleness bound: if the offset has not been refreshed within twice the normal refresh
-            // window, reset it to zero (fall back to pure local clock). A stale offset that has
-            // drifted during a prolonged DB outage would skew all lease timestamps on recovery.
-            // Lease writes during the outage fail at the DB call regardless, so local time is safe.
-            if (lastClockSyncAt > 0 && now - lastClockSyncAt > stalenessThresholdMs) {
+            // Staleness bound: use lastSuccessfulClockSyncAt so the clock drift guard fires
+            // correctly during a prolonged DB outage (Finding 4). Resetting lastClockSyncAt=0
+            // on each failed attempt must not prevent the bound from being evaluated.
+            if (lastSuccessfulClockSyncAt != 0 && now - lastSuccessfulClockSyncAt > stalenessThresholdMs) {
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug("DB clock offset for [{}] is stale ({}ms old), resetting to zero (local clock).",
-                            getLeaderElectionInformation().getElectionGroupName(), now - lastClockSyncAt);
+                    LOG.debug("DB clock offset for [{}] is stale ({}ms since last successful sync), resetting to zero (local clock).",
+                            getLeaderElectionInformation().getElectionGroupName(), now - lastSuccessfulClockSyncAt);
                 }
                 dbClockOffsetMillis = 0;
             }

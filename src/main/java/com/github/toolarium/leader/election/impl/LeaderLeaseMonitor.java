@@ -24,9 +24,11 @@ import org.slf4j.LoggerFactory;
 final class LeaderLeaseMonitor {
     private static final Logger LOG = LoggerFactory.getLogger(LeaderLeaseMonitor.class);
     private static final long CHECK_PERIOD_MILLIS = 100L;
+    private static final int CONSECUTIVE_FAILURE_WARN_THRESHOLD = 3;
 
     private final Set<DefaultLeaderLease> leases = ConcurrentHashMap.newKeySet();
     private ScheduledExecutorService executorService;
+    private int consecutiveCheckFailures;
 
 
     /**
@@ -87,11 +89,17 @@ final class LeaderLeaseMonitor {
                     lease.interruptIfRunning();
                 }
             }
+            consecutiveCheckFailures = 0;
         } catch (RuntimeException e) {
+            consecutiveCheckFailures++;
             if (LOG.isDebugEnabled()) {
-                LOG.debug("Could not check the leader leases: " + e.getMessage(), e);
+                LOG.debug("Could not check the leader leases: {}", e.getMessage(), e);
             }
-            LOG.info("Could not check the leader leases: {}, will retry on next check interval.", e.getMessage());
+            if (consecutiveCheckFailures >= CONSECUTIVE_FAILURE_WARN_THRESHOLD) {
+                LOG.warn("Repeated failure ({}) checking leader leases: {}, tasks may not be interrupted promptly on leadership loss.", consecutiveCheckFailures, e.getMessage());
+            } else {
+                LOG.info("Could not check the leader leases: {}, will retry on next check interval.", e.getMessage());
+            }
         }
     }
 }

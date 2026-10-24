@@ -30,7 +30,7 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
     public LeaderElectionInformation(String namespace, String name, String identity) {
         this.namespace = namespace;
         this.name = name;
-        if (identity != null && !identity.trim().isEmpty()) {
+        if (identity != null && !identity.isBlank()) {
             this.identity = identity;
         } else {
             this.identity = UUID.randomUUID().toString();
@@ -181,18 +181,18 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
      */
     public String getElectionGroupName() {
         String clusterName = "";
-        if (getNamespace() != null && !getNamespace().trim().isEmpty()) {
+        if (getNamespace() != null && !getNamespace().isBlank()) {
             clusterName = getNamespace();
         }
 
-        if (getName() != null && !getName().trim().isEmpty()) {
+        if (getName() != null && !getName().isBlank()) {
             if (!clusterName.isEmpty()) {
                 clusterName += ".";
             }
             clusterName += getName();
         }
 
-        if (clusterName.isEmpty() && getIdentity() != null && !getIdentity().trim().isEmpty()) {
+        if (clusterName.isEmpty() && getIdentity() != null && !getIdentity().isBlank()) {
             clusterName = getIdentity();
         }
 
@@ -207,18 +207,18 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
      */
     public String getUniqueName() {
         String clusterName = "";
-        if (getNamespace() != null && !getNamespace().trim().isEmpty()) {
+        if (getNamespace() != null && !getNamespace().isBlank()) {
             clusterName = getNamespace();
         }
         
-        if (getName() != null && !getName().trim().isEmpty()) {
+        if (getName() != null && !getName().isBlank()) {
             if (!clusterName.isEmpty()) {
                 clusterName += ".";
             }
             clusterName += getName();
         }
 
-        if (getIdentity() != null && !getIdentity().trim().isEmpty()) {
+        if (getIdentity() != null && !getIdentity().isBlank()) {
             if (!clusterName.isEmpty()) {
                 clusterName += ".";
             }

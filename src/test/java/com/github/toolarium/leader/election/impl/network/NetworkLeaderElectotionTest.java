@@ -55,6 +55,25 @@ public class NetworkLeaderElectotionTest extends AbstractLeaderElectorTest {
 
 
     /**
+     * Overrides the base test because {@code elect(null)} delegates to the no-timeout {@code elect()},
+     * which blocks on the election latch indefinitely if JGroups has not yet fired a view.
+     * This override establishes leadership with a bounded timeout first so that the
+     * {@code elect(null)} call is idempotent and returns the already-known state immediately.
+     *
+     * @throws Exception In case of an error
+     */
+    @Test
+    @Override
+    public void testElectWithNullTimeout() throws Exception {
+        ILeaderElector elector = createLeaderElector("testNullTimeout");
+        assertTrue(elector.elect(Duration.ofMillis(getInitWaitMillis())), "Must become leader on first elect()");
+        assertTrue(elector.elect((Duration) null), "elect(null) on established elector must return true immediately");
+        assertTrue(elector.isLeader());
+        elector.close();
+    }
+
+
+    /**
      * Overrides the base test to insert a stabilisation pause between the two lifecycles.
      * After a JGroups channel is closed, the underlying UDP socket and cluster membership
      * state need a moment to settle before a new channel connects to the same cluster name.

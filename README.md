@@ -325,13 +325,13 @@ ILeaderElector leaderElector = LeaderElectionFactory.getInstance().getLeaderElec
 leaderElector.elect();
 ```
 
-The library creates and manages the required `LeaderElection` table automatically. On startup it inspects the table schema and, if a v1.0.0 installation is detected (column named `timestamp`), renames it to `lease_ts` automatically. On new installations a secondary index on the `instance` column is also created; existing installations can add it manually with `CREATE INDEX idx_leaderelection_instance ON LeaderElection(instance)`.
+The library creates and manages the required `LeaderElection` table automatically. Schema setup runs at `build()` / `getLeaderElection()` time, before `elect()` is called, so missing tables and failed migrations surface immediately. On first use it inspects the table schema and, if a v1.0.0 installation is detected (column named `timestamp`), renames it to `lease_ts` automatically. On new installations a secondary index on the `instance` column is also created; existing installations can add it manually with `CREATE INDEX idx_leaderelection_instance ON LeaderElection(instance)`.
 
 > **Externally managed schemas (Flyway, Liquibase, no DDL rights)**
-> If the database user has no DDL privileges, or the table is managed by a migration tool, set `allowDdl=false` on the configuration. The library will then fail fast with a descriptive error, including the exact DDL to apply, instead of attempting `CREATE TABLE` or `ALTER TABLE` at startup:
+> If the database user has no DDL privileges, or the table is managed by a migration tool, set `allowDdl=false` on the configuration. The library will then fail fast with a descriptive error at build time, including the exact DDL to apply, instead of attempting `CREATE TABLE` or `ALTER TABLE`:
 >
 > ```java
-> config.setAllowDdl(false);  // disable runtime DDL; elect() throws if the table or column is missing
+> config.setAllowDdl(false);  // disable runtime DDL; build() throws if the table or column is missing
 > ```
 >
 > Expected columns: `id VARCHAR(36)`, `name VARCHAR(512)`, `instance VARCHAR(255)`, `username VARCHAR(255)`, `lease_ts BIGINT NOT NULL`, `force_release_deadline BIGINT NULL` (primary key on `name`).

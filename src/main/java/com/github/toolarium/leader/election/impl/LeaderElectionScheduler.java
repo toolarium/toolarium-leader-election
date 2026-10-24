@@ -139,7 +139,7 @@ public final class LeaderElectionScheduler {
      * @throws LeaderElectionException if the elector cannot be closed cleanly
      */
     public boolean forceRelease(String id) throws LeaderElectionException {
-        if (id == null || id.trim().isEmpty()) {
+        if (id == null || id.isBlank()) {
             return false;
         }
         ILeaderElector[] snapshot = leaderElectors.toArray(new ILeaderElector[0]);

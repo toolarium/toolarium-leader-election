@@ -29,14 +29,6 @@ dependencies {
 
 
 /****************************************************************************************
- * Suppress obsolete source/target warnings when compiling with a newer JDK
- ****************************************************************************************/
-tasks.withType(JavaCompile) {
-    options.compilerArgs << '-Xlint:-options'
-}
-
-
-/****************************************************************************************
  * Integration test source set (only compiled and run with -Pintegration)
  ****************************************************************************************/
 if (project.hasProperty('integration')) {

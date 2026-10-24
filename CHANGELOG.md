@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **DATABASE**: `forceRelease()` on a remote leader now prevents split-brain overlap; no other node can acquire leadership until the force-release deadline elapses, ensuring a clean handover.
 - **DATABASE**: automatic schema migration adds the `force_release_deadline` column to existing installations on startup.
-- **DATABASE**: `DatabaseLeaderElectionConfiguration.setAllowDdl(false)` disables DDL execution (`CREATE TABLE` / `ALTER TABLE`) at startup. When DDL is required and disabled, `elect()` throws a descriptive error with the exact SQL to apply manually. Default is `true`.
+- **DATABASE**: `DatabaseLeaderElectionConfiguration.setAllowDdl(false)` disables DDL execution (`CREATE TABLE` / `ALTER TABLE`). When DDL is required and disabled, the factory throws a descriptive error at build time with the exact SQL to apply manually. Default is `true`.
 - **DATABASE**: a node that stepped down due to a renew-deadline timeout now automatically re-acquires leadership once its own lease expires, without requiring a restart.
+
+### Changed
+- **DATABASE**: schema initialisation (table creation, migrations) now runs at factory build time inside `build()` / `getLeaderElection()`, before `elect()` is called. Schema errors and `allowDdl=false` failures therefore surface immediately when the elector is constructed, not deferred to the first election tick.
 
 ### Fixed
 - **DATABASE**: leadership can no longer be held beyond the configured renew deadline when the scheduler thread is delayed or blocked.
@@ -18,14 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ALL**: `ILeaderLease.isValid()` correctly returns `false` for leases from a previous leadership term after a lose-and-regain cycle.
 - **DATABASE**: `close()` now correctly interrupts running `runIfLeader` tasks even when the close budget is nearly exhausted.
 - **DATABASE**: a scheduler tick already in flight when `close()` is called can no longer re-establish leadership after `close()` has invalidated it.
-- **ALL**: Java 8 source/target compatibility restored.
+- **ALL**: source/target compatibility raised to Java 11.
 - **FILE**: scheduler fields and channel reference are now correctly visible across threads, preventing resource leaks on `close()`.
 - **FILE**: interrupt flag is preserved when the file-lock scheduler shuts down.
 - **DATABASE**: lease renewal is committed correctly when the data source uses non-auto-commit mode.
 - **DATABASE**: `ILeaderLease.tryExtend()` is now safe to call from within a JTA-managed transaction.
 - **DATABASE**: `forceRelease()` returns `false` for blank ids instead of throwing an undeclared exception.
-- **DATABASE**: `CREATE TABLE`, `CREATE INDEX`, and `ALTER TABLE` DDL statements are now committed explicitly so schema changes are visible to other nodes when the connection pool uses non-auto-commit mode (affects PostgreSQL pools configured with `autoCommit=false`).
-- **DATABASE**: concurrent callers of the internal DB-clock sync (e.g. scheduler thread and a `runIfLeader` caller) no longer each issue a redundant DB round-trip when a refresh is due.
+- **DATABASE**: DDL statements are committed explicitly so schema changes are visible to other nodes when the connection pool uses non-auto-commit mode.
+- **DATABASE**: concurrent DB-clock refreshes no longer each issue a redundant round-trip.
+- **DATABASE**: `ILeaderLease.tryExtend()` returns `false` on timeout or interrupt instead of throwing, matching the documented contract.
+- **DATABASE**: DB clock refresh failure no longer suppresses subsequent refresh attempts within the same window.
+- **ALL**: lease monitor check failures now escalate from INFO to WARN after 3 consecutive failures, making it visible when running tasks may not be interrupted promptly on leadership loss.
 
 ## [ 1.2.1 ] - 2026-10-22
 ### Added

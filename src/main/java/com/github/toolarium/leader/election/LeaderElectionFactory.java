@@ -174,7 +174,9 @@ public final class LeaderElectionFactory {
             case DATABASE:
                 if (leaderElectionConfiguration instanceof DatabaseLeaderElectionConfiguration) {
                     LOG.info("Use database leader elector.");
-                    leaderElector = new DatabaseLeaderElectorImpl(leaderElectionInformation, (DatabaseLeaderElectionConfiguration)leaderElectionConfiguration);
+                    DatabaseLeaderElectorImpl dbElector = new DatabaseLeaderElectorImpl(leaderElectionInformation, (DatabaseLeaderElectionConfiguration)leaderElectionConfiguration);
+                    dbElector.initializeSchema();
+                    leaderElector = dbElector;
                 } else {
                     throw new LeaderElectionException("Invalid configuration. To use database leader election you must define a " + DatabaseLeaderElectionConfiguration.class.getName() + "!");
                 }
@@ -519,8 +521,7 @@ public final class LeaderElectionFactory {
             if (databaseStructure != null) {
                 config.setLeaderElectionDatabaseStructure(databaseStructure);
             }
-            return LeaderElectionFactory.getInstance().getLeaderElection(
-                    LeaderElectionStrategy.DATABASE, parent.buildInfo(), config);
+            return LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.DATABASE, parent.buildInfo(), config);
         }
     }
 
@@ -552,8 +553,7 @@ public final class LeaderElectionFactory {
          */
         public ILeaderElector build() throws LeaderElectionException {
             LeaderElectionConfiguration config = parent.buildBaseConfig(new LeaderElectionConfiguration());
-            return LeaderElectionFactory.getInstance().getLeaderElection(
-                    LeaderElectionStrategy.NETWORK, parent.buildInfo(), config);
+            return LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.NETWORK, parent.buildInfo(), config);
         }
     }
 
@@ -585,8 +585,7 @@ public final class LeaderElectionFactory {
          */
         public ILeaderElector build() throws LeaderElectionException {
             LeaderElectionConfiguration config = parent.buildBaseConfig(new LeaderElectionConfiguration());
-            return LeaderElectionFactory.getInstance().getLeaderElection(
-                    LeaderElectionStrategy.KUBERNETES, parent.buildInfo(), config);
+            return LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.KUBERNETES, parent.buildInfo(), config);
         }
     }
 
