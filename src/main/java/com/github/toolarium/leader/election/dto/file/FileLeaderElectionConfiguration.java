@@ -73,7 +73,7 @@ public class FileLeaderElectionConfiguration extends LeaderElectionConfiguration
     /**
      * @see com.github.toolarium.leader.election.dto.LeaderElectionConfiguration#validate()
      */
-    protected void validate() {
+    public void validate() {
         super.validate();
         basePath = createBasePath(basePath);
     }

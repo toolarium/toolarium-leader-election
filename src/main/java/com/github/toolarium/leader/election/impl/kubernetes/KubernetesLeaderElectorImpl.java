@@ -16,6 +16,7 @@ import io.kubernetes.client.extended.leaderelection.resourcelock.EndpointsLock;
 import io.kubernetes.client.openapi.ApiClient;
 import io.kubernetes.client.util.Config;
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,6 +31,7 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
     private io.kubernetes.client.extended.leaderelection.LeaderElector leaderElector;
     private Thread updateThread;
     private volatile boolean runThread;
+    private final AtomicBoolean closing = new AtomicBoolean(false);
     private final ApiClient preConfiguredClient;
     private ApiClient resolvedClient;
 
@@ -67,6 +69,8 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
      */
     @Override
     protected void initializeImplementation() throws LeaderElectionException {
+        closing.set(false);
+
         if (LOG.isDebugEnabled()) {
             LOG.debug("Initialize kubernetes api client...");
         }
@@ -143,27 +147,32 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
      */
     @Override
     public void close() throws LeaderElectionException {
+        if (!closing.compareAndSet(false, true)) {
+            return;
+        }
+
         runThread = false;
         final Thread thread = updateThread;
         updateThread = null;
 
-        if (leaderElector != null) {
-            LOG.info("Exited from [{}].", getLeaderElectionInformation().getUniqueName());
-            try {
-                leaderElector.close();
-            } catch (Exception e) {
-                // NOP
-            }
-        }
-        leaderElector = null;
-
-        // Join the update thread inside a finally block so it is always cleaned up
-        // even when super.close() throws.
+        // Wait for running runIfLeader tasks BEFORE releasing the Kubernetes lock so
+        // another node cannot acquire leadership while this node's task is still running.
         long closeTimeoutMillis = getLeaderElectionConfiguration().getCloseTimeout().toMillis();
         boolean threadStillAlive = false;
         try {
             super.close();
         } finally {
+            // Release the Kubernetes Endpoints lock after tasks have finished.
+            if (leaderElector != null) {
+                LOG.info("Exited from [{}].", getLeaderElectionInformation().getUniqueName());
+                try {
+                    leaderElector.close();
+                } catch (Exception e) {
+                    // NOP
+                }
+                leaderElector = null;
+            }
+
             if (thread != null) {
                 thread.interrupt();
                 try {

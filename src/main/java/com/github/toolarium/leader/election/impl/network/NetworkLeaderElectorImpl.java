@@ -14,6 +14,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.jgroups.Address;
 import org.jgroups.Global;
 import org.jgroups.JChannel;
@@ -37,12 +38,14 @@ import org.slf4j.LoggerFactory;
 public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderElectionConfiguration> {
     private static final Logger LOG = LoggerFactory.getLogger(NetworkLeaderElectorImpl.class);
     /**
-     * Extra milliseconds added on top of {@code retryPeriod} to form the phantom-member stabilisation
-     * window.  The window must be strictly greater than {@code retryPeriod} so the scheduler's first
-     * tick (fired at {@code t ≈ retryPeriod}) is never considered definitive.  JGroups FD_ALL3 declares
-     * failure within ~3-4 s by default, which is always less than {@code retryPeriod + 2 s}.
+     * Minimum milliseconds after channel init before a "not leader" result is considered definitive.
+     * JGroups FD_ALL3 removes stale members from prior JVM runs within ~3 s; 4 s provides a safe
+     * margin for that protocol. The effective stabilization window is
+     * {@code max(PHANTOM_MEMBER_STABILIZE_MS, retryPeriod + 1000)} so that at least one full
+     * scheduler tick can observe a clean (phantom-free) view before the "not leader" result is
+     * released to the election latch.
      */
-    private static final long PHANTOM_MEMBER_STABILIZE_EXTRA_MS = 2000L;
+    private static final long PHANTOM_MEMBER_STABILIZE_MS = 4000L;
     // volatile: written by initializeImplementation() (under lifecycleLock writeLock) and read by
     // close() without holding any lock; volatile is required for the JMM happens-before guarantee.
     private volatile ScheduledExecutorService scheduledExecuterService;
@@ -52,6 +55,7 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
     // and skip channel.close(), leaking the JGroups socket and cluster membership (TS-1).
     private volatile JChannel channel;
     private volatile long channelInitTime;
+    private final AtomicBoolean closing = new AtomicBoolean(false);
 
 
     /**
@@ -74,6 +78,8 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
      */
     @Override
     protected void initializeImplementation() throws LeaderElectionException {
+        closing.set(false);
+
         if (LOG.isDebugEnabled()) {
             LOG.debug("Initialize network channel...");
         }
@@ -85,7 +91,7 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
 
         // Record when the channel was initialised so isElectionResultDefinitive() can suppress
         // premature "not leader" latch release during the JGroups phantom-member window (first 5 s).
-        channelInitTime = System.currentTimeMillis();
+        channelInitTime = System.nanoTime();
 
         // ch.connect() fires viewAccepted() synchronously, but the receiver guard (!isInitialized()) drops that initial event
         // because isInitialized is still false here. Apply the established view directly so a "is leader" result can unblock
@@ -98,7 +104,12 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
             }
         }
 
-        scheduledExecuterService = Executors.newScheduledThreadPool(1);
+        String groupName = getLeaderElectionInformation().getElectionGroupName();
+        scheduledExecuterService = Executors.newScheduledThreadPool(1, runnable -> {
+            Thread t = new Thread(runnable, "leader-election-network-" + groupName);
+            t.setDaemon(true);
+            return t;
+        });
         scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(new NetworkLeaderElectionHandler(channel), 0, getLeaderElectionConfiguration().getRetryPeriod().toMillis(), TimeUnit.MILLISECONDS);
     }
 
@@ -112,10 +123,12 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
             return true;
         }
         // Suppress "not leader" latch release during the phantom-member stabilisation window.
-        // JGroups FD_ALL3 removes stale members from prior JVM runs within ~3 s; we wait 5 s
-        // to be safe before treating a "not leader" view as the definitive election result.
-        return System.currentTimeMillis() - channelInitTime
-                >= getLeaderElectionConfiguration().getRetryPeriod().toMillis() + PHANTOM_MEMBER_STABILIZE_EXTRA_MS;
+        // JGroups FD_ALL3 removes stale members from prior JVM runs within ~3 s. The effective
+        // window is max(4 s, retryPeriod + 1 s) so that at least one full scheduler tick can
+        // observe a clean (phantom-free) view before the result is released.
+        long retryMs = getLeaderElectionConfiguration().getRetryPeriod().toMillis();
+        long windowMs = Math.max(PHANTOM_MEMBER_STABILIZE_MS, retryMs + 1000L);
+        return System.nanoTime() - channelInitTime >= TimeUnit.MILLISECONDS.toNanos(windowMs);
     }
 
 
@@ -124,6 +137,10 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
      */
     @Override
     public void close() throws LeaderElectionException {
+        if (!closing.compareAndSet(false, true)) {
+            return;
+        }
+
         // Cancel the scheduler and drain any in-flight tick before resetting state.
         // This prevents a concurrent tick from calling setLeader() after super.close()
         // has already reset isLeader to null.
@@ -210,6 +227,16 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
             ch.connect(clusterName);
             LOG.info("Connected to cluster [{}] ({}).", clusterName, ch.getAddress());
         } catch (Exception e) {
+            // Close the partially-constructed channel so it does not leak the JGroups
+            // socket. Return null so initializeImplementation() fails fast.
+            if (channel != null) {
+                try {
+                    channel.close();
+                } catch (Exception ignored) {
+                    // best-effort cleanup
+                }
+                channel = null;
+            }
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Could not join to network cluster [{}]: {}", clusterName, e.getMessage(), e);
             }
@@ -246,6 +273,11 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
             try {
                 View view = channel.getView();
                 if (view == null || view.getMembers().isEmpty()) {
+                    // No view available; after the stabilisation window, unblock elect() so
+                    // the caller does not hang indefinitely when UDP cannot deliver a view.
+                    if (!hasElectionResult() && isElectionResultDefinitive(false)) {
+                        setLeader(false, null);
+                    }
                     return;
                 }
                 Address address = view.getMembers().get(0);
@@ -255,6 +287,15 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderEl
                     LOG.debug("Error occurred while verifying network cluster [{}]: {}", getLeaderElectionInformation().getUniqueName(), e.getMessage(), e);
                 }
                 LOG.info("Error occurred while verifying network cluster [{}]: {}, will retry on next election tick.", getLeaderElectionInformation().getUniqueName(), e.getMessage());
+                // Step down when the cluster state is unknown so a broken channel
+                // does not keep this node as leader indefinitely.
+                if (isLeader()) {
+                    setLeader(false, null);
+                }
+                // Ensure elect() can return even when the very first tick fails.
+                if (!hasElectionResult() && isElectionResultDefinitive(false)) {
+                    setLeader(false, null);
+                }
             }
         }
     }

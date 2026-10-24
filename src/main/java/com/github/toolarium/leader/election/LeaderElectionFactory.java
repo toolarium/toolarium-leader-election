@@ -174,6 +174,7 @@ public final class LeaderElectionFactory {
             case DATABASE:
                 if (leaderElectionConfiguration instanceof DatabaseLeaderElectionConfiguration) {
                     LOG.info("Use database leader elector.");
+                    ((DatabaseLeaderElectionConfiguration) leaderElectionConfiguration).validateDataSource();
                     DatabaseLeaderElectorImpl dbElector = new DatabaseLeaderElectorImpl(leaderElectionInformation, (DatabaseLeaderElectionConfiguration)leaderElectionConfiguration);
                     dbElector.initializeSchema();
                     leaderElector = dbElector;
@@ -394,6 +395,18 @@ public final class LeaderElectionFactory {
         <C extends LeaderElectionConfiguration> C buildBaseConfig(C config) {
             if (timeout != null) {
                 config.setTimeout(timeout);
+                // When only timeout is set, derive renewDeadline and retryPeriod from it
+                // so the defaults (based on 10 s) do not violate the validation constraints.
+                if (renewDeadline == null && retryPeriod == null) {
+                    long secs = timeout.toSeconds();
+                    Duration derivedRetry = timeout.dividedBy(2);
+                    Duration derivedRenew = Duration.ofSeconds(secs - derivedRetry.toSeconds());
+                    if (derivedRenew.toSeconds() <= derivedRetry.toSeconds()) {
+                        derivedRenew = derivedRenew.plus(derivedRenew.dividedBy(2));
+                    }
+                    config.setRetryPeriod(derivedRetry);
+                    config.setRenewDeadline(derivedRenew);
+                }
             }
             if (renewDeadline != null) {
                 config.setRenewDeadline(renewDeadline);
@@ -404,6 +417,9 @@ public final class LeaderElectionFactory {
             if (closeTimeout != null) {
                 config.setCloseTimeout(closeTimeout);
             }
+            // Validate after all fields are set so intermediate states (e.g. timeout
+            // reduced below the current renewDeadline) do not cause false rejections.
+            config.validate();
             return config;
         }
     }

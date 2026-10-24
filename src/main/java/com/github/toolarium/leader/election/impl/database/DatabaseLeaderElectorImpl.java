@@ -15,7 +15,6 @@ import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl;
 import com.github.toolarium.leader.election.impl.database.dao.LeaderElectionDAO;
 import com.github.toolarium.leader.election.impl.database.dao.LeaderElectorRecord;
-import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -32,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,6 +66,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     // Sentinel for lastRenewalNanos and backoffUntil meaning "not yet set". Long.MIN_VALUE is used rather than 0 because System.nanoTime() has an arbitrary origin
     // and may legally return negative values; using 0 as "not set" silently disables the step-down guards on such platforms.
     private static final long NANOS_NOT_SET = Long.MIN_VALUE;
+    // Maximum time to wait for the schema-init thread (CREATE TABLE, migrations) before failing.
+    private static final long SCHEMA_INIT_TIMEOUT_MILLIS = 30_000L;
     // volatile: written by elect() (initialization thread) and read by close() (potentially from another thread, e.g. the JVM shutdown hook registered by LeaderElectionScheduler).
     private volatile ScheduledExecutorService scheduledExecuterService;
     private volatile ScheduledFuture<?> scheduledFuture;
@@ -96,6 +98,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
     // Dedicated lock for dbClockOffsetMillis / lastClockSyncAt so that getDbNow() (which may execute a DB round-trip) does not block threads waiting for
     // synchronized(this), e.g. close() calling signalLeaderInvalid().
     private final Object clockSyncLock = new Object();
+    // Guards initializeSchema() so only one caller runs the DDL; concurrent callers wait for the result.
+    private final Object schemaInitLock = new Object();
 
     // -----------------------------------------------------------------------
     // Lock acquisition order: MUST be respected to prevent deadlock:
@@ -137,17 +141,50 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
      * the factory (e.g. in tests) are handled correctly, and to cover the re-election case after
      * {@link #close()} has reset the flag.
      *
+     * <p>The DAO call runs on a dedicated thread so the JDBC connection is never JTA-enlisted,
+     * even when {@code build()} or {@code getLeaderElection()} is called inside a
+     * container-managed transaction (e.g. a {@code @Transactional} startup method).
+     * JTA context is thread-local; the fresh thread has no active transaction, so
+     * {@code commitIfNeeded()} after DDL succeeds regardless of the caller's context.
+     *
      * @throws LeaderElectionException if schema creation or migration fails
      */
     public void initializeSchema() throws LeaderElectionException {
         if (schemaReady.get()) {
             return;
         }
-        try {
-            leaderElectionDAO.init();
+        synchronized (schemaInitLock) {
+            if (schemaReady.get()) {
+                return;
+            }
+            // Run on a dedicated thread so the connection borrowed from the DataSource is not
+            // JTA-enlisted when build() is called inside a container-managed transaction.
+            AtomicReference<Exception> error = new AtomicReference<>();
+            Thread initThread = new Thread(() -> {
+                try {
+                    leaderElectionDAO.init();
+                } catch (Exception e) {
+                    error.set(e);
+                }
+            }, "leader-election-schema-init");
+            initThread.setDaemon(true);
+            initThread.start();
+            try {
+                initThread.join(SCHEMA_INIT_TIMEOUT_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new LeaderElectionException("Schema initialisation interrupted", e);
+            }
+            if (initThread.isAlive()) {
+                initThread.interrupt();
+                throw new LeaderElectionException("Schema initialisation timed out after " + SCHEMA_INIT_TIMEOUT_MILLIS + "ms. "
+                        + "Check database connectivity and whether a DDL lock is held by another session.");
+            }
+            if (error.get() != null) {
+                Exception cause = error.get();
+                throw new LeaderElectionException("Could not prepare database for leader election: " + cause.getMessage(), cause);
+            }
             schemaReady.set(true);
-        } catch (SQLException e) {
-            throw new LeaderElectionException("Could not prepare database for leader election: " + e.getMessage(), e);
         }
     }
 
@@ -170,6 +207,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         if (info.getName() == null || info.getName().isBlank()) {
             throw new LeaderElectionException("LeaderElectionInformation.name must not be blank; set it via Builder.name(\"your-app\").");
         }
+        getLeaderElectionConfiguration().validateDataSource();
 
         initializeSchema();  // idempotent: no-op if already called by the factory at build time
         daoReady = true;
@@ -231,6 +269,10 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             return false;
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
+            if (cause instanceof RejectedExecutionException) {
+                // Executor shut down between submit() and execution; not a DB error.
+                return false;
+            }
             if (cause instanceof LeaderElectionException) {
                 throw (LeaderElectionException) cause;
             }
@@ -501,9 +543,9 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             try {
                 deadline = leaderElectionDAO.getDatabaseCurrentTimeMillis() + renewDeadlineMillis;
             } catch (Exception e) {
-                LOG.info("Could not fetch DB clock for force-release [{}], falling back to local clock: {}",
+                LOG.info("Could not fetch DB clock for force-release [{}], falling back to local clock with cached offset: {}",
                         instanceId, e.getMessage());
-                deadline = System.currentTimeMillis() + renewDeadlineMillis;
+                deadline = System.currentTimeMillis() + dbClockOffsetMillis + renewDeadlineMillis;
             }
             int updated = leaderElectionDAO.setForceReleaseDeadline(instanceId, deadline);
             if (updated > 0) {

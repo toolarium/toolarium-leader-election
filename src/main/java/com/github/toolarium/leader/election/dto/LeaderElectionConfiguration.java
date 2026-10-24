@@ -71,7 +71,7 @@ public class LeaderElectionConfiguration implements ILeaderElectionConfiguration
      *  
      * @throws IllegalArgumentException In case of a parameter failure
      */
-    protected void validate() throws IllegalArgumentException {
+    public void validate() throws IllegalArgumentException {
         if (timeout == null || timeout.isZero()) {
             throw new IllegalArgumentException("Invalid timeout!");
         } else if (timeout.toSeconds() < 0) {

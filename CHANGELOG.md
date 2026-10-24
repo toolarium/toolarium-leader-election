@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DATABASE**: a node that stepped down due to a renew-deadline timeout now automatically re-acquires leadership once its own lease expires, without requiring a restart.
 
 ### Changed
-- **DATABASE**: schema initialisation (table creation, migrations) now runs at factory build time inside `build()` / `getLeaderElection()`, before `elect()` is called. Schema errors and `allowDdl=false` failures therefore surface immediately when the elector is constructed, not deferred to the first election tick.
+- **DATABASE**: schema initialisation (table creation, migrations) now runs at factory build time inside `build()` / `getLeaderElection()`, before `elect()` is called. Schema errors and `allowDdl=false` failures therefore surface immediately when the elector is constructed, not deferred to the first election tick. The DDL runs on a dedicated thread so `build()` is safe to call inside a JTA-managed transaction.
 
 ### Fixed
 - **DATABASE**: leadership can no longer be held beyond the configured renew deadline when the scheduler thread is delayed or blocked.
@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DATABASE**: `ILeaderLease.tryExtend()` returns `false` on timeout or interrupt instead of throwing, matching the documented contract.
 - **DATABASE**: DB clock refresh failure no longer suppresses subsequent refresh attempts within the same window.
 - **ALL**: lease monitor check failures now escalate from INFO to WARN after 3 consecutive failures, making it visible when running tasks may not be interrupted promptly on leadership loss.
+- **NETWORK**: phantom-member stabilisation window no longer blocks `elect()` beyond the timeout; the window is now `max(4 s, retryPeriod + 1 s)` and the scheduler unblocks the election latch when no view is available after the window elapses.
 
 ## [ 1.2.1 ] - 2026-10-22
 ### Added

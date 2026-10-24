@@ -94,7 +94,9 @@ public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderE
         try {
             super.close();
         } finally {
-            FileLockFactory.getInstance().release(lockToRelease);
+            if (lockToRelease != null) {
+                FileLockFactory.getInstance().release(lockToRelease);
+            }
         }
     }
 }

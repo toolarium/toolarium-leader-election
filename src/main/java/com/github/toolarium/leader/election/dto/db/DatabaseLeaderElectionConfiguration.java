@@ -145,10 +145,23 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
     /**
      * @see com.github.toolarium.leader.election.dto.LeaderElectionConfiguration#validate()
      */
-    protected void validate() {
+    public void validate() {
         super.validate();
         // leaderElectionDatabaseStructure may be null here; the DAO auto-detects the
         // correct dialect from the JDBC product name on first connection if none is set.
+    }
+
+
+    /**
+     * Validate that the DataSource is set. Called after all setters have been applied
+     * (not from the constructor, since the DataSource is typically set after construction).
+     *
+     * @throws IllegalArgumentException if the DataSource is null
+     */
+    public void validateDataSource() throws IllegalArgumentException {
+        if (dataSource == null) {
+            throw new IllegalArgumentException("DataSource must not be null. Set it via setDataSource() or the builder's dataSource() method.");
+        }
     }
 
 
