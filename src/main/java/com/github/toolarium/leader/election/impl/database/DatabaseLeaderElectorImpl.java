@@ -21,11 +21,16 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
@@ -158,9 +163,58 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
     /**
      * @see com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl#extendLeaseNow()
+     *
+     * <p>The DB write is submitted to the scheduler thread so that the renewal connection is
+     * borrowed outside any active JTA transaction on the caller's thread. This allows
+     * {@link com.github.toolarium.leader.election.ILeaderLease#tryExtend()} to be safely called
+     * from within a container-managed ({@code @Transactional}) method without the DataSource
+     * returning a JTA-enlisted connection or {@code commitIfNeeded()} committing the caller's
+     * transaction early.
+     *
+     * <p>{@link #runAsExtension(Callable)} is invoked on the scheduler thread so that the
+     * {@code extendingInProgress} ThreadLocal is set on the same thread that calls
+     * {@link #setLeader(Boolean, String)}, keeping the leadership-term counter correct.
      */
     @Override
     protected boolean extendLeaseNow() throws LeaderElectionException {
+        ScheduledExecutorService ses = scheduledExecuterService;
+        if (ses == null || ses.isShutdown()) {
+            return false;
+        }
+        long timeoutMillis = getLeaderElectionConfiguration().getRenewDeadline().toMillis();
+        Future<Boolean> future;
+        try {
+            future = ses.submit(() -> runAsExtension(this::doDbExtendLease));
+        } catch (RejectedExecutionException e) {
+            return false;
+        }
+        try {
+            return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new LeaderElectionException("Lease extension interrupted");
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new LeaderElectionException("Lease extension timed out after " + timeoutMillis + "ms");
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof LeaderElectionException) {
+                throw (LeaderElectionException) cause;
+            }
+            throw new LeaderElectionException("Could not extend leader lease: " + cause.getMessage(), cause);
+        }
+    }
+
+
+    /**
+     * Performs the actual DB write for a lease extension. Must only be called from the scheduler
+     * thread (submitted by {@link #extendLeaseNow()}) so that the DataSource connection is
+     * borrowed outside any JTA transaction context.
+     *
+     * @return {@code true} if the lease was extended successfully and this node is still the leader
+     * @throws LeaderElectionException on DB access errors
+     */
+    private boolean doDbExtendLease() throws LeaderElectionException {
         if (!isLeader()) {
             return false;
         }
@@ -678,15 +732,24 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
         // that a blocked DB round-trip never prevents close()/signalLeaderInvalid() from
         // acquiring synchronized(this).
         boolean needsRefresh;
+        boolean isFirstSync;
         synchronized (clockSyncLock) {
-            needsRefresh = lastClockSyncAt == 0 || now - lastClockSyncAt > refreshThresholdMs;
+            isFirstSync = lastClockSyncAt == 0;
+            needsRefresh = isFirstSync || now - lastClockSyncAt > refreshThresholdMs;
+            if (needsRefresh) {
+                // Claim the refresh slot optimistically so concurrent callers (e.g. the
+                // scheduler thread and a runIfLeader caller in extendLeaseNow()) that both
+                // see needsRefresh=true do not each issue a redundant DB round-trip (TS-1).
+                // On DB failure lastClockSyncAt is reset to 0 so the next tick can retry.
+                lastClockSyncAt = now;
+            }
         }
         if (needsRefresh) {
             try {
                 long dbNow = leaderElectionDAO.getDatabaseCurrentTimeMillis();
                 // Write fields back under the lock; use the pre-call `now` so that
-                // lastClockSyncAt reflects when the refresh was initiated (prevents
-                // concurrent callers from both issuing the DB call).
+                // lastClockSyncAt reflects when the refresh was initiated (consistent with
+                // the optimistic write above).
                 synchronized (clockSyncLock) {
                     dbClockOffsetMillis = dbNow - now;
                     lastClockSyncAt = now;
@@ -694,15 +757,20 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 return dbNow;
             } catch (Exception e) {
                 synchronized (clockSyncLock) {
-                    if (lastClockSyncAt > 0) {
-                        if (LOG.isDebugEnabled()) {
-                            LOG.debug("Could not refresh DB clock offset for [{}], using stale offset: {}",
-                                    getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
-                        }
-                    } else {
-                        LOG.info("Could not fetch initial DB clock for [{}], using local clock: {}",
+                    // Reset so the next tick can attempt the refresh. Without this reset
+                    // the optimistic lastClockSyncAt=now would suppress all further refresh
+                    // attempts within the refresh window even though no successful sync
+                    // has occurred, leaving an arbitrarily stale offset in effect.
+                    lastClockSyncAt = 0;
+                }
+                if (!isFirstSync) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Could not refresh DB clock offset for [{}], using stale offset: {}",
                                 getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
                     }
+                } else {
+                    LOG.info("Could not fetch initial DB clock for [{}], using local clock: {}",
+                            getLeaderElectionInformation().getElectionGroupName(), e.getMessage());
                 }
             }
         }

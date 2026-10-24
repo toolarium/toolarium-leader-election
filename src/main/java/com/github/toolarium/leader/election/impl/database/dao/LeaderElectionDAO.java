@@ -92,11 +92,16 @@ public class LeaderElectionDAO {
                     try (Statement stmt = conn.createStatement()) {
                         stmt.execute(leaderElectionDatabaseStructure.createSQLTable());
                     }
+                    // Commit the CREATE TABLE so it is visible to other nodes even when the connection comes from a 
+                    // non-auto-commit pool (PostgreSQL makes DDL transactional; without commit the table is rolled 
+                    // back on pool return).
+                    commitIfNeeded(conn);
                     String indexSql = leaderElectionDatabaseStructure.createSQLIndex();
                     if (indexSql != null) {
                         try (Statement idxStmt = conn.createStatement()) {
                             idxStmt.execute(indexSql);
                         }
+                        commitIfNeeded(conn);
                     }
                 } catch (SQLException e) {
                     // Concurrent creation: another node may have won the race; re-check before failing.
@@ -500,6 +505,8 @@ public class LeaderElectionDAO {
                 try (Statement stmt = conn.createStatement()) {
                     stmt.execute(leaderElectionDatabaseStructure.createSQLRenameTimestampColumn());
                 }
+                // Commit the RENAME so it is visible to other nodes (non-auto-commit pools).
+                commitIfNeeded(conn);
                 LOG.info("Schema migration of table {} completed successfully.", tableName);
                 columns.remove("timestamp");
                 columns.add("lease_ts");
@@ -529,6 +536,8 @@ public class LeaderElectionDAO {
                 try (Statement stmt = conn.createStatement()) {
                     stmt.execute(leaderElectionDatabaseStructure.createSQLAddForceReleaseDeadlineColumn());
                 }
+                // Commit the ADD COLUMN so it is visible to other nodes (non-auto-commit pools).
+                commitIfNeeded(conn);
                 LOG.info("Schema migration of table {} completed (force_release_deadline added).", tableName);
                 columns.add("force_release_deadline");
             } catch (SQLException e) {

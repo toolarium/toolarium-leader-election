@@ -98,6 +98,13 @@ public interface ILeaderLease {
      * {@code renewDeadline} window, giving the task another full cycle.
      * An extension can fail if leadership was already lost to another node.
      *
+     * <p><strong>DATABASE strategy and JTA:</strong> this method is safe to call from within
+     * a container-managed ({@code @Transactional}) method. The renewal DB write is submitted
+     * to the internal scheduler thread, which has no active JTA transaction; the DataSource
+     * therefore returns a plain, non-enlisted connection that can be committed immediately.
+     * The call blocks until the scheduler thread completes the renewal or the renew deadline
+     * elapses.
+     *
      * @return {@code true} if the lease was successfully extended and this node is still the leader,
      *         {@code false} if the extension failed or leadership was already lost
      * @throws LeaderElectionException if the extension attempt encounters an unrecoverable error

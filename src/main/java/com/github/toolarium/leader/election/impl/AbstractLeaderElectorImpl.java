@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -384,6 +385,34 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         extendingInProgress.set(Boolean.TRUE);
         try {
             return extendLeaseNow();
+        } finally {
+            extendingInProgress.set(Boolean.FALSE);
+        }
+    }
+
+
+    /**
+     * Executes {@code body} with the {@code extendingInProgress} flag set on the <em>calling</em>
+     * thread's {@link ThreadLocal}, then clears the flag before returning.
+     * Subclasses whose extension work must run on a different thread (e.g. DATABASE, which
+     * submits to the scheduler thread to avoid JTA-enlisted connections) call this from a
+     * {@link java.util.concurrent.Callable} submitted to that thread. Because the flag is set
+     * on the thread that will later call {@link #setLeader(Boolean, String)}, the term counter
+     * is correctly suppressed even when the actual DB write happens on a thread other than the
+     * one that initiated the extension.
+     *
+     * @param body the extend work; must not be {@code null}
+     * @return the value returned by {@code body}
+     * @throws LeaderElectionException if {@code body} throws
+     */
+    protected final boolean runAsExtension(Callable<Boolean> body) throws LeaderElectionException {
+        extendingInProgress.set(Boolean.TRUE);
+        try {
+            return body.call();
+        } catch (LeaderElectionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new LeaderElectionException("Could not extend leader lease: " + e.getMessage(), e);
         } finally {
             extendingInProgress.set(Boolean.FALSE);
         }

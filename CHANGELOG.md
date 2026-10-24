@@ -21,8 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ALL**: Java 8 source/target compatibility restored.
 - **FILE**: scheduler fields and channel reference are now correctly visible across threads, preventing resource leaks on `close()`.
 - **FILE**: interrupt flag is preserved when the file-lock scheduler shuts down.
-- **DATABASE**: lease renewal is committed correctly when the data source is configured without auto-commit or when called inside a JTA transaction.
+- **DATABASE**: lease renewal is committed correctly when the data source uses non-auto-commit mode.
+- **DATABASE**: `ILeaderLease.tryExtend()` is now safe to call from within a JTA-managed transaction.
 - **DATABASE**: `forceRelease()` returns `false` for blank ids instead of throwing an undeclared exception.
+- **DATABASE**: `CREATE TABLE`, `CREATE INDEX`, and `ALTER TABLE` DDL statements are now committed explicitly so schema changes are visible to other nodes when the connection pool uses non-auto-commit mode (affects PostgreSQL pools configured with `autoCommit=false`).
+- **DATABASE**: concurrent callers of the internal DB-clock sync (e.g. scheduler thread and a `runIfLeader` caller) no longer each issue a redundant DB round-trip when a refresh is due.
 
 ## [ 1.2.1 ] - 2026-10-22
 ### Added
@@ -32,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DATABASE**: node now correctly steps down when the renew deadline passes before a renewal completes.
 - **DATABASE**: `ILeaderLease.isValid()` correctly returns `false` for a lease from a prior leadership term after a lose-and-regain cycle.
 - **DATABASE**: `close()` stops any running `runIfLeader` task before releasing the database row.
-- **DATABASE**: non-auto-commit data sources are now supported.
+- **DATABASE**: non-auto-commit data sources are now supported for scheduler-thread renewals.
 - **DATABASE**: `close()` is idempotent; calling it more than once no longer causes errors.
 - **DATABASE**: scheduler threads are daemon threads, preventing JVM hang on shutdown when `close()` is not called.
 - **DATABASE**: elector can be reused after a `close()` + `elect()` cycle without restarting the application.
