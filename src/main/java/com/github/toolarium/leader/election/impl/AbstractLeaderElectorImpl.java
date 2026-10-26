@@ -21,7 +21,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.slf4j.Logger;
@@ -48,7 +47,8 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
     private final ThreadLocal<Boolean> extendingInProgress;
     private final Map<String, ReentrantLock> taskLocks;
     private final LeaderLeaseMonitor leaseMonitor;
-    private final ReadWriteLock lifecycleLock;
+    private final ReentrantReadWriteLock lifecycleLock;
+    private final ReentrantLock transitionLock;
 
 
     /**
@@ -71,6 +71,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         taskLocks = new ConcurrentHashMap<>();
         leaseMonitor = new LeaderLeaseMonitor();
         lifecycleLock = new ReentrantReadWriteLock();
+        transitionLock = new ReentrantLock();
     }
 
 
@@ -88,8 +89,8 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      */
     @Override
     public boolean elect() throws LeaderElectionException, InterruptedException {
-        startElectionIfNeeded();
-        electionLatch.await();
+        CountDownLatch latch = startElectionIfNeeded();
+        latch.await();
         return isLeader();
     }
 
@@ -102,8 +103,8 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         if (timeout == null) {
             return elect();
         }
-        startElectionIfNeeded();
-        electionLatch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        CountDownLatch latch = startElectionIfNeeded();
+        latch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
         return isLeader();
     }
 
@@ -190,6 +191,94 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
 
 
     /**
+     * Close the elector state and wait for running leader tasks within the close timeout. Subclasses call this
+     * instead of {@code super.close()} when they release their lock afterwards, see
+     * {@link #releaseWhenTasksFinished(boolean, String, Runnable)}.
+     *
+     * @return true if no leader task runs anymore, false if tasks are still running after the close timeout
+     *         or close() was called from one of the elector's own tasks
+     * @throws LeaderElectionException if cleanup fails
+     */
+    protected boolean closeAndAwaitTasks() throws LeaderElectionException {
+        return closeInternal(leaderElectionConfiguration.getCloseTimeout().toMillis());
+    }
+
+
+    /**
+     * Release the lock of a closed elector: at once when no leader task runs anymore, otherwise as soon as the
+     * running tasks have finished. Releasing the lock while a task still runs would let another node take the lead
+     * while this node still does leader work.
+     *
+     * @param tasksFinished true if no leader task runs anymore, see {@link #closeAndAwaitTasks()}
+     * @param threadName the name of the thread that waits for the running tasks
+     * @param release the release of the lock
+     */
+    protected void releaseWhenTasksFinished(boolean tasksFinished, String threadName, Runnable release) {
+        if (tasksFinished) {
+            release.run();
+            return;
+        }
+
+        LOG.info("Leader tasks of [{}] are still running; the lock is released as soon as they have finished.", leaderElectionInformation.getUniqueName());
+        Thread releaseThread = new Thread(() -> {
+            // the write lock is only granted once every running task released its read lock
+            Lock writeLock = lifecycleLock.writeLock();
+            writeLock.lock();
+            writeLock.unlock();
+            release.run();
+        }, threadName);
+        releaseThread.setDaemon(true);
+        releaseThread.start();
+    }
+
+
+    /**
+     * Run a close action serialized with the initialization of the first {@code elect()}, so that close() neither
+     * runs while the initialization is half done nor misses resources that the initialization creates concurrently.
+     * If the initialization does not finish within the given time, the action runs anyway.
+     *
+     * @param waitMillis maximum milliseconds to wait for a running initialization
+     * @param closeAction the close action
+     * @throws LeaderElectionException if the close action fails
+     */
+    protected void closeSerialized(long waitMillis, CloseAction closeAction) throws LeaderElectionException {
+        boolean transitionLocked = false;
+        try {
+            transitionLocked = tryLockTransition(waitMillis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (!transitionLocked) {
+            // usually a slow initialization, e.g. a schema creation or a cluster join: the close continues without it
+            LOG.info("The initialization of [{}] is still running after {} ms, closing anyway. Increase the close timeout if this repeats.",
+                     leaderElectionInformation.getUniqueName(), waitMillis);
+        }
+
+        try {
+            closeAction.run();
+        } finally {
+            if (transitionLocked) {
+                unlockTransition();
+            }
+        }
+    }
+
+
+    /**
+     * A close action, see {@link AbstractLeaderElectorImpl#closeSerialized(long, CloseAction)}.
+     */
+    @FunctionalInterface
+    protected interface CloseAction {
+        /**
+         * Run the close action.
+         *
+         * @throws LeaderElectionException if the close action fails
+         */
+        void run() throws LeaderElectionException;
+    }
+
+
+    /**
      * Shared close logic used by {@link #close()} and by subclasses that compute a single
      * close deadline across several steps. Subclasses should call this instead of
      * {@link #close()} when they have already spent part of the close budget waiting for
@@ -197,10 +286,11 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * not exceed the configured {@code closeTimeout}.
      *
      * @param writeLockTimeoutMillis maximum milliseconds to wait for the lifecycle write lock
+     * @return true if no leader task runs anymore
      * @throws LeaderElectionException if cleanup fails
      */
-    protected void closeInternal(long writeLockTimeoutMillis) throws LeaderElectionException {
-        closeInternal(Boolean.TRUE.equals(isLeader), writeLockTimeoutMillis);
+    protected boolean closeInternal(long writeLockTimeoutMillis) throws LeaderElectionException {
+        return closeInternal(Boolean.TRUE.equals(isLeader), writeLockTimeoutMillis);
     }
 
 
@@ -212,14 +302,17 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      *
      * @param wasLeader              {@code true} if this node held leadership before close
      * @param writeLockTimeoutMillis maximum milliseconds to wait for the lifecycle write lock
+     * @return true if no leader task runs anymore, false if tasks are still running after the timeout
+     *         or close() was called from one of the elector's own tasks
      * @throws LeaderElectionException if cleanup fails
      */
-    protected void closeInternal(boolean wasLeader, long writeLockTimeoutMillis) throws LeaderElectionException {
+    protected boolean closeInternal(boolean wasLeader, long writeLockTimeoutMillis) throws LeaderElectionException {
         // Signal any running tasks: setting isLeader=null makes isValid() return false,
         // so the LeaderLeaseMonitor will interrupt them on its next check (within 100 ms).
-        isLeader = null;
-        timestamp = null;
-        electionClosed = true;
+        // Done under the same intrinsic lock as setLeader() so that a background callback
+        // (JGroups receiver, file lock scheduler, ...) cannot write isLeader=true between
+        // these field writes and leave a closed elector reporting leadership.
+        signalLeaderInvalid();
 
         // Wait for all running runIfLeader tasks to finish (they hold read locks).
         // The monitor interrupts them within CHECK_PERIOD_MILLIS; the write lock is
@@ -228,10 +321,18 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
         // elapses (tasks will still be interrupted by the monitor).
         Lock writeLock = lifecycleLock.writeLock();
         boolean locked = false;
-        try {
-            locked = writeLock.tryLock(Math.max(0L, writeLockTimeoutMillis), TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        if (lifecycleLock.getReadHoldCount() > 0) {
+            // close() called from inside a runIfLeader task: this thread holds a read lock, which can
+            // never be upgraded to the write lock, so waiting would only burn the whole close budget.
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Close of [{}] was requested by one of its own leader tasks; not waiting for running tasks.", leaderElectionInformation.getUniqueName());
+            }
+        } else {
+            try {
+                locked = writeLock.tryLock(Math.max(0L, writeLockTimeoutMillis), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         try {
@@ -249,6 +350,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                 writeLock.unlock();
             }
         }
+        return locked;
     }
 
 
@@ -274,10 +376,10 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                 return false;
             }
 
-            ReentrantLock taskLock = taskLocks.computeIfAbsent(name, k -> new ReentrantLock());
-            if (!taskLock.tryLock()) {
+            ReentrantLock taskLock = acquireTaskLock(name);
+            if (taskLock == null) {
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug("runIfLeader [{}]: task already running, skipping.", name);
+                    LOG.debug("Leader task [{}]: task already running, skipping.", name);
                 }
                 return false;
             }
@@ -287,7 +389,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
 
             try {
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug("runIfLeader [{}]: starting.", name);
+                    LOG.debug("Leader task [{}]: starting.", name);
                 }
                 task.run(lease);
                 return true;
@@ -298,7 +400,7 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                     Thread.currentThread().interrupt();
                 }
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug("runIfLeader [{}]: interrupted (leadership lost or elector closed).", name);
+                    LOG.debug("Leader task [{}]: interrupted (leadership lost or elector closed).", name);
                 }
                 return true;
             } catch (RuntimeException e) {
@@ -339,11 +441,34 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
                     return null;
                 });
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug("runIfLeader [{}]: finished.", name);
+                    LOG.debug("Leader task [{}]: finished.", name);
                 }
             }
         } finally {
             readLock.unlock();
+        }
+    }
+
+
+    /**
+     * Acquire the lock of a named leader task. A finishing task removes its unlocked lock from the map, so a lock
+     * fetched from the map may already be removed when it is acquired; a third caller would then create a second
+     * lock for the same name and both would run. The lock only counts while it is still the one in the map.
+     *
+     * @param name the task name
+     * @return the acquired lock, or null if the task is already running
+     */
+    private ReentrantLock acquireTaskLock(String name) {
+        while (true) {
+            ReentrantLock taskLock = taskLocks.computeIfAbsent(name, k -> new ReentrantLock());
+            if (!taskLock.tryLock()) {
+                return null;
+            }
+            if (taskLocks.get(name) == taskLock) {
+                // a locked lock is never removed from the map
+                return taskLock;
+            }
+            taskLock.unlock();
         }
     }
 
@@ -426,10 +551,12 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
      * @param inputDescription the description
      */
     protected synchronized void setLeader(final Boolean isLeader, final String inputDescription) {
-        // Once close() has invalidated the elector, refuse to re-establish leadership.
+        // Once close() has invalidated the elector, ignore every late state update from background
+        // threads. Refusing only "true" is not enough: a late "false" would turn the cleared (null)
+        // state into a definitive result and break the first-result handling after re-election.
         // signalLeaderInvalid() is also synchronized, so electionClosed is visible here
         // without an additional volatile read race.
-        if (electionClosed && Boolean.TRUE.equals(isLeader)) {
+        if (electionClosed) {
             return;
         }
         String newDescription;
@@ -512,29 +639,73 @@ public abstract class AbstractLeaderElectorImpl<T extends LeaderElectionConfigur
 
 
     /**
-     * Start the election machinery if it has not been started yet (idempotent).
-     * Uses the lifecycle write lock so that concurrent calls to {@link #close()} are
-     * properly serialized with initialization.
+     * Acquire the transition lock that serializes initialization (first {@code elect()}) against
+     * {@code close()}. Subclasses whose {@code close()} tears down resources created by
+     * {@link #initializeImplementation()} call this first, so that close() can neither run while
+     * initialization is half done nor miss resources that initialization creates concurrently.
+     * Lock order: transition lock first, then the lifecycle lock.
      *
+     * @param timeoutMillis maximum milliseconds to wait
+     * @return true if the lock was acquired; the caller must then call {@link #unlockTransition()}
+     * @throws InterruptedException if the calling thread is interrupted while waiting
+     */
+    protected boolean tryLockTransition(long timeoutMillis) throws InterruptedException {
+        return transitionLock.tryLock(Math.max(0L, timeoutMillis), TimeUnit.MILLISECONDS);
+    }
+
+
+    /**
+     * Release the transition lock acquired by {@link #tryLockTransition(long)}.
+     */
+    protected void unlockTransition() {
+        transitionLock.unlock();
+    }
+
+
+    /**
+     * Start the election machinery if it has not been started yet (idempotent).
+     * Uses the transition lock and the lifecycle write lock so that concurrent calls to
+     * {@link #close()} are properly serialized with initialization.
+     *
+     * @return the election latch of the session this call belongs to
      * @throws LeaderElectionException In case of an initialisation error
      */
-    private void startElectionIfNeeded() throws LeaderElectionException {
+    private CountDownLatch startElectionIfNeeded() throws LeaderElectionException {
         // Fast-path: already initialized; no lock needed (volatile read).
+        // Read the latch BEFORE isInitialized: closeInternal() clears isInitialized before it swaps
+        // the latch, so if we observe the new latch we also observe isInitialized=false and take the
+        // slow path. If close() swaps the latch after our read, it counts down the latch we hold.
+        // Either way elect() cannot end up waiting on a latch nobody will ever count down.
+        CountDownLatch latch = electionLatch;
         if (isInitialized) {
-            return;
+            return latch;
         }
-        Lock writeLock = lifecycleLock.writeLock();
-        writeLock.lock();
+        if (lifecycleLock.getReadHoldCount() > 0) {
+            // Called from inside a runIfLeader task after the elector was closed: initialization needs
+            // the write lock, which this thread can never get while it holds the task's read lock.
+            throw new LeaderElectionException("elect() must not be called from within a runIfLeader task of a closed elector ["
+                                              + leaderElectionInformation.getUniqueName() + "].");
+        }
+        transitionLock.lock();
         try {
-            // Re-check under lock: another thread may have initialized between the volatile read above and lock acquisition.
-            if (!isInitialized) {
-                electionClosed = false;
-                leaseMonitor.start();
-                initializeImplementation();
-                isInitialized = true;
+            Lock writeLock = lifecycleLock.writeLock();
+            writeLock.lock();
+            try {
+                // Re-check under lock: another thread may have initialized between the volatile read above and lock acquisition.
+                if (!isInitialized) {
+                    electionClosed = false;
+                    leaseMonitor.start();
+                    initializeImplementation();
+                    isInitialized = true;
+                    // close() unregisters the elector: register it again so the shutdown hook also closes a re-elected elector
+                    LeaderElectionScheduler.getInstance().register(this);
+                }
+                return electionLatch;
+            } finally {
+                writeLock.unlock();
             }
         } finally {
-            writeLock.unlock();
+            transitionLock.unlock();
         }
     }
 }

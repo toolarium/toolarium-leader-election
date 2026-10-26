@@ -7,15 +7,20 @@ package com.github.toolarium.leader.election.impl;
 
 import com.github.toolarium.leader.election.ILeaderElector;
 import com.github.toolarium.leader.election.ILeaderElectorView;
+import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.database.DatabaseLeaderElectorImpl;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -112,12 +117,25 @@ public final class LeaderElectionScheduler {
     public Collection<ILeaderElectorView> getElectorViews() {
         List<ILeaderElectorView> result = new ArrayList<>();
         ILeaderElector[] snapshot = leaderElectors.toArray(new ILeaderElector[0]);
+        // Several DATABASE electors (different election groups) usually share one table, and every
+        // one of them returns all rows of it: query each DataSource/table only once and drop
+        // duplicate rows (same election group and elector instance).
+        Map<DataSource, Set<String>> queriedTables = new IdentityHashMap<>();
+        Set<String> seenRows = new HashSet<>();
 
         for (ILeaderElector elector : snapshot) {
             if (elector instanceof DatabaseLeaderElectorImpl) {
                 // DATABASE: the table is the authoritative state and already covers remote nodes.
                 // Do NOT mix in the local isLeader() state; the DB view is the single source of truth.
-                result.addAll(((DatabaseLeaderElectorImpl) elector).getDatabaseElectorViews());
+                DatabaseLeaderElectorImpl dbElector = (DatabaseLeaderElectorImpl) elector;
+                if (isTableAlreadyQueried(dbElector, queriedTables)) {
+                    continue;
+                }
+                for (ILeaderElectorView view : dbElector.getDatabaseElectorViews()) {
+                    if (seenRows.add(view.getLeaderElectionInformation().getElectionGroupName() + "|" + view.getId())) {
+                        result.add(view);
+                    }
+                }
             } else if (elector.isLeader() && elector instanceof ILeaderElectorView) {
                 // FILE / NETWORK / KUBERNETES: use the local elector's known state.
                 result.add((ILeaderElectorView) elector);
@@ -125,6 +143,25 @@ public final class LeaderElectionScheduler {
         }
 
         return Collections.unmodifiableList(result);
+    }
+
+
+    /**
+     * Check whether the table of a DATABASE elector was already queried (same DataSource instance and
+     * table name return the same rows) and record it otherwise.
+     *
+     * @param dbElector the database elector
+     * @param queriedTables the tables queried so far, per DataSource instance
+     * @return true if the table was already queried; false if it must be queried (also when it
+     *     cannot be determined)
+     */
+    private static boolean isTableAlreadyQueried(DatabaseLeaderElectorImpl dbElector, Map<DataSource, Set<String>> queriedTables) {
+        DatabaseLeaderElectionConfiguration config = dbElector.getLeaderElectionConfiguration();
+        if (config == null || config.getDataSource() == null || config.getLeaderElectionDatabaseStructure() == null) {
+            return false;
+        }
+        String tableName = config.getLeaderElectionDatabaseStructure().getTableName();
+        return !queriedTables.computeIfAbsent(config.getDataSource(), ds -> new HashSet<>()).add(tableName);
     }
 
 

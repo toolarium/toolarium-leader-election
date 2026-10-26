@@ -7,9 +7,12 @@ package com.github.toolarium.leader.election.impl.database;
 
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.db.OracleLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.impl.database.dao.LeaderElectionDAO;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 import oracle.jdbc.pool.OracleDataSource;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.testcontainers.containers.OracleContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -27,6 +30,25 @@ public class OracleLeaderElectionTest extends AbstractDatabaseLeaderElectorTest 
 
     @Container
     private static final OracleContainer ORACLE = new OracleContainer("gvenzl/oracle-xe:21-slim");
+    private static final AtomicBoolean WARMED_UP = new AtomicBoolean(false);
+
+
+    /**
+     * Warm up the freshly started container once: the first statements of a cold Oracle XE take several seconds (table
+     * creation, first queries), longer than the query timeout of an election round, so the first test would fail its
+     * first round.
+     *
+     * @throws Exception in case of an error
+     */
+    @BeforeEach
+    public void warmUp() throws Exception {
+        if (WARMED_UP.compareAndSet(false, true)) {
+            LeaderElectionDAO dao = new LeaderElectionDAO(createConfiguration());
+            dao.init();
+            dao.selectLeaderByName("warm-up");
+            dao.getDatabaseCurrentTimeMillis();
+        }
+    }
 
 
     /**
@@ -93,7 +115,7 @@ public class OracleLeaderElectionTest extends AbstractDatabaseLeaderElectorTest 
         ds.setUser(ORACLE.getUsername());
         ds.setPassword(ORACLE.getPassword());
         DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(
-                Duration.ofSeconds(30), Duration.ofSeconds(5), Duration.ofSeconds(5));
+                Duration.ofSeconds(30), Duration.ofSeconds(10), Duration.ofSeconds(5));
         config.setDataSource(ds);
         config.setLeaderElectionDatabaseStructure(new OracleLeaderElectionDatabaseStructure());
         return config;

@@ -76,24 +76,42 @@ public abstract class AbstractLeaderElectorTest {
      */
     @Test
     public void testInitialize() throws Exception {
-        LOG.debug("->Get leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Get leader");
+        }
         ILeaderElector leaderElector = createLeaderElector("testInitialize");
-        LOG.debug("->Check leader before elect");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Check leader before elect");
+        }
         assertFalse(leaderElector.isLeader());
         Thread.sleep(50L);
-        LOG.debug("->Check leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Check leader");
+        }
         assertFalse(leaderElector.isLeader());
-        LOG.debug("->Elect leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Elect leader");
+        }
         assertTrue(leaderElector.elect(Duration.ofMillis(getInitWaitMillis())));
-        LOG.debug("->Elect leader (idempotent)");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Elect leader (idempotent)");
+        }
         assertTrue(leaderElector.elect(Duration.ofMillis(100)));
-        LOG.debug("->Check leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Check leader");
+        }
         assertTrue(leaderElector.isLeader());
-        LOG.debug("->Close leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Close leader");
+        }
         leaderElector.close();
-        LOG.debug("->Close leader (idempotent)");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Close leader (idempotent)");
+        }
         leaderElector.close();
-        LOG.debug("->Check leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Check leader");
+        }
         assertFalse(leaderElector.isLeader());
     }
 

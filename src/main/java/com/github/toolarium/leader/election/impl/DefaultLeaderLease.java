@@ -143,6 +143,17 @@ final class DefaultLeaderLease implements ILeaderLease {
 
 
     /**
+     * Test if the task of this lease runs on the given thread.
+     *
+     * @param thread the thread or null
+     * @return true if the task runs on the given thread
+     */
+    boolean isTaskThread(Thread thread) {
+        return thread != null && taskThread == thread;
+    }
+
+
+    /**
      * Returns {@code true} if the lease monitor has already sent an interrupt to the task thread.
      *
      * @return true if the monitor has already interrupted the task thread

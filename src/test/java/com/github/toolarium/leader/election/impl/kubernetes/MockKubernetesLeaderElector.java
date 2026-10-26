@@ -277,16 +277,22 @@ public final class MockKubernetesLeaderElector {
             /*
             mockLock.setConsumers(
                     record -> {
-                        LOG.debug("[CREATE] " + KubernetesUtil.getInstance().toString(record));
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("[CREATE] " + KubernetesUtil.getInstance().toString(record));
+                        }
                         electionHistory.add("create record");
                         leadershipHistory.add("get leadership");
                     },
                     record -> {
-                        LOG.debug("[UPDATE] " + KubernetesUtil.getInstance().toString(record));
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("[UPDATE] " + KubernetesUtil.getInstance().toString(record));
+                        }
                         electionHistory.add("update record");
                     },
                     record -> {
-                        LOG.debug("[CHANGE] " + KubernetesUtil.getInstance().toString(record));
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("[CHANGE] " + KubernetesUtil.getInstance().toString(record));
+                        }
                         electionHistory.add("change record");
                     });
 */

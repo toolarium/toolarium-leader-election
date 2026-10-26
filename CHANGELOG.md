@@ -5,34 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
 ## [ 1.3.0 ] - 2026-10-24
 ### Added
-- **DATABASE**: `forceRelease()` on a remote leader now prevents split-brain overlap; no other node can acquire leadership until the force-release deadline elapses, ensuring a clean handover.
-- **DATABASE**: automatic schema migration adds the `force_release_deadline` column to existing installations on startup.
-- **DATABASE**: `DatabaseLeaderElectionConfiguration.setAllowDdl(false)` disables DDL execution (`CREATE TABLE` / `ALTER TABLE`). When DDL is required and disabled, the factory throws a descriptive error at build time with the exact SQL to apply manually. Default is `true`.
-- **DATABASE**: a node that stepped down due to a renew-deadline timeout now automatically re-acquires leadership once its own lease expires, without requiring a restart.
+- **DATABASE**: `setAllowDdl(false)` disables automatic table creation and migration; existing tables are migrated automatically otherwise.
+- **NETWORK**: `minimumMembers()` sets a quorum, so the minority side of a network partition has no leader.
+- **NETWORK**: `encryptionKey()` encrypts the cluster messages with a shared key; `configuration()` sets a custom JGroups configuration. Without either, an info message is logged.
+- **KUBERNETES**: `lockType()` selects the lock; the default is a Lease, `ENDPOINTS` keeps the lock of 1.2.x for a rolling upgrade.
 
 ### Changed
-- **DATABASE**: schema initialisation (table creation, migrations) now runs at factory build time inside `build()` / `getLeaderElection()`, before `elect()` is called. Schema errors and `allowDdl=false` failures therefore surface immediately when the elector is constructed, not deferred to the first election tick. The DDL runs on a dedicated thread so `build()` is safe to call inside a JTA-managed transaction.
+- **ALL**: Java 11 or later is required.
+- **ALL**: new timing defaults (timeout 15 s, renew deadline 10 s, retry period 5 s) and stricter validation of the timings.
+- **ALL**: electors share a few threads, and their rounds are spread over the retry period.
+- **ALL**: leader tasks that still run after the close timeout keep the lock until they end.
+- **DATABASE**: schema errors are reported when the elector is built; the schema is checked once per table.
+- **DATABASE**: SQL Server 2016 or later is required.
+- **FILE**: lock files are kept after `close()`, are never truncated, and symbolic links are refused. Special characters in the namespace and name are replaced in the file name.
+- **KUBERNETES**: the default lock is a Lease; the service account needs RBAC access to `leases`.
+- **NETWORK**: the coordinator only keeps the lead while the other members confirm it; the keystore password is passed as `char[]`.
 
 ### Fixed
-- **DATABASE**: leadership can no longer be held beyond the configured renew deadline when the scheduler thread is delayed or blocked.
-- **DATABASE**: `runIfLeader` tasks are interrupted reliably when leadership is lost, with no spurious interrupt leaks to the calling thread.
-- **ALL**: `ILeaderLease.isValid()` correctly returns `false` for leases from a previous leadership term after a lose-and-regain cycle.
-- **DATABASE**: `close()` now correctly interrupts running `runIfLeader` tasks even when the close budget is nearly exhausted.
-- **DATABASE**: a scheduler tick already in flight when `close()` is called can no longer re-establish leadership after `close()` has invalidated it.
-- **ALL**: source/target compatibility raised to Java 11.
-- **FILE**: scheduler fields and channel reference are now correctly visible across threads, preventing resource leaks on `close()`.
-- **FILE**: interrupt flag is preserved when the file-lock scheduler shuts down.
-- **DATABASE**: lease renewal is committed correctly when the data source uses non-auto-commit mode.
-- **DATABASE**: `ILeaderLease.tryExtend()` is now safe to call from within a JTA-managed transaction.
-- **DATABASE**: `forceRelease()` returns `false` for blank ids instead of throwing an undeclared exception.
-- **DATABASE**: DDL statements are committed explicitly so schema changes are visible to other nodes when the connection pool uses non-auto-commit mode.
-- **DATABASE**: concurrent DB-clock refreshes no longer each issue a redundant round-trip.
-- **DATABASE**: `ILeaderLease.tryExtend()` returns `false` on timeout or interrupt instead of throwing, matching the documented contract.
-- **DATABASE**: DB clock refresh failure no longer suppresses subsequent refresh attempts within the same window.
-- **ALL**: lease monitor check failures now escalate from INFO to WARN after 3 consecutive failures, making it visible when running tasks may not be interrupted promptly on leadership loss.
-- **NETWORK**: phantom-member stabilisation window no longer blocks `elect()` beyond the timeout; the window is now `max(4 s, retryPeriod + 1 s)` and the scheduler unblocks the election latch when no view is available after the window elapses.
+- **ALL**: no more than one leader during handover, close and re-election in all strategies; a node stops reporting the lead once it was not confirmed within the renew deadline.
+- **ALL**: a closed elector never reports the lead, `elect()` and `close()` no longer block or leak threads, locks or tasks, and an elector can be elected again after `close()`.
+- **ALL**: leader tasks are interrupted reliably when the lead is lost, leases of an earlier term are invalid, and a named task never runs twice at the same time.
+- **ALL**: the shutdown hook also closes electors that were elected again after `close()`.
+- **DATABASE**: a healthy leader keeps the lead with the default timings, lease expiry no longer depends on the JVM time zone, and a slow or unreachable database no longer blocks `elect()` or keeps a node leading.
+- **DATABASE**: `forceRelease()` hands the lead to another node without overlap.
+- **DATABASE**: works with non-auto-commit data sources and inside JTA transactions; `tryExtend()` returns `false` instead of throwing or waiting.
+- **DATABASE**: the administration view lists every leader once with its own election name.
+- **FILE**: long-running tasks are no longer interrupted by the lock renewal, the JVM can exit, and different names no longer share a lock file.
+- **FILE**: a lock held by another process is tried again once per retry period instead of every second.
+- **KUBERNETES**: `elect()` returns on a follower, the lock is released on `close()`, `close()` respects the close timeout, and the node keeps competing after an unexpected error.
+- **NETWORK**: joining no longer fails on Windows hosts with reserved port ranges, `elect()` respects its timeout, and a node with an outdated cluster view no longer keeps the lead.
+
 
 ## [ 1.2.1 ] - 2026-10-22
 ### Added

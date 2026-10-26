@@ -166,6 +166,8 @@ public class DatabaseStructureTest {
         // MySQL uses backtick-quoting for the reserved word 'timestamp'
         assertTrue(s.createSQLRenameTimestampColumn().contains("`timestamp`"));
         assertTrue(s.createSQLRenameTimestampColumn().contains(LEASE_TS_COL));
+        // Epoch millis computed on the server: CURRENT_TIMESTAMP alone is zone-less (JVM time zone dependent)
+        assertTrue(s.createSQLSelectCurrentTimestampMillis().contains("UNIX_TIMESTAMP"));
     }
 
 
@@ -185,6 +187,7 @@ public class DatabaseStructureTest {
         // MariaDB inherits MySQL backtick quoting
         assertTrue(s.createSQLRenameTimestampColumn().contains("`timestamp`"));
         assertTrue(s.createSQLRenameTimestampColumn().contains(LEASE_TS_COL));
+        assertTrue(s.createSQLSelectCurrentTimestampMillis().contains("UNIX_TIMESTAMP"));
     }
 
 
@@ -265,6 +268,8 @@ public class DatabaseStructureTest {
         assertTrue(s.createSQLRenameTimestampColumn().contains("sp_rename"));
         assertTrue(s.createSQLRenameTimestampColumn().contains("[timestamp]"));
         assertTrue(s.createSQLRenameTimestampColumn().contains(LEASE_TS_COL));
+        // Epoch millis computed from UTC on the server: CURRENT_TIMESTAMP is zone-less local time
+        assertTrue(s.createSQLSelectCurrentTimestampMillis().contains("SYSUTCDATETIME"));
     }
 
 

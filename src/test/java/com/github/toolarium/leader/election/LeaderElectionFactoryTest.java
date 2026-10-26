@@ -349,6 +349,30 @@ public class LeaderElectionFactoryTest {
 
 
     /**
+     * When only the timeout is set on the builder, retryPeriod and renewDeadline must be derived as
+     * timeout / 3 and 2 * timeout / 3, so the renew deadline covers two renewal rounds.
+     *
+     * @throws Exception In case of an error
+     */
+    @Test
+    public void testBuilderDerivesTimingsFromTimeout() throws Exception {
+        ILeaderElector elector = LeaderElectionFactory.builder()
+                .namespace(BUILDER_NAMESPACE).name("timing-derive-test").identity(BUILDER_IDENTITY)
+                .timeout(Duration.ofSeconds(15))
+                .file()
+                .build();
+        try {
+            ILeaderElectionConfiguration cfg = ((ILeaderElectorView) elector).getLeaderElectionConfiguration();
+            assertEquals(Duration.ofSeconds(15), cfg.getTimeout());
+            assertEquals(Duration.ofSeconds(10), cfg.getRenewDeadline(), "renewDeadline must be 2 * timeout / 3");
+            assertEquals(Duration.ofSeconds(5), cfg.getRetryPeriod(), "retryPeriod must be timeout / 3");
+        } finally {
+            elector.close();
+        }
+    }
+
+
+    /**
      * closeTimeout set on the builder must be propagated to the built elector's configuration.
      *
      * @throws Exception In case of an error
@@ -379,14 +403,22 @@ public class LeaderElectionFactoryTest {
      * @throws Exception In case of an error
      */
     protected void verifyElect(LeaderElectionStrategy strategy, LeaderElectionInformation leaderElectionInformation, LeaderElectionConfiguration leaderElectionConfiguration) throws Exception {
-        LOG.debug("->Get leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Get leader");
+        }
         ILeaderElector leaderElector = LeaderElectionFactory.getInstance().getLeaderElection(strategy, leaderElectionInformation, leaderElectionConfiguration);
-        LOG.debug("->Check leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Check leader");
+        }
         assertFalse(leaderElector.isLeader());
         Thread.sleep(50);
-        LOG.debug("->Check leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Check leader");
+        }
         assertFalse(leaderElector.isLeader());
-        LOG.debug("->Elect leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Elect leader");
+        }
         // NETWORK strategy needs extra time: JGroups UDP multicast stabilisation window is
         // retryPeriod + 2 s = 3 s, but a previous test step (e.g. FILE testMultipleLeaders)
         // can take up to 10 s, leaving phantom cluster members that need additional time to
@@ -396,15 +428,25 @@ public class LeaderElectionFactoryTest {
             electTimeoutMs = 20000L;
         }
         assertTrue(leaderElector.elect(Duration.ofMillis(electTimeoutMs)));
-        LOG.debug("->Elect leader (idempotent)");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Elect leader (idempotent)");
+        }
         assertTrue(leaderElector.elect(Duration.ofMillis(100)));
-        LOG.debug("->Check leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Check leader");
+        }
         assertTrue(leaderElector.isLeader());
-        LOG.debug("->Close leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Close leader");
+        }
         leaderElector.close();
-        LOG.debug("->Close leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Close leader");
+        }
         leaderElector.close();
-        LOG.debug("->Check leader");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("->Check leader");
+        }
         assertFalse(leaderElector.isLeader());
     }
 

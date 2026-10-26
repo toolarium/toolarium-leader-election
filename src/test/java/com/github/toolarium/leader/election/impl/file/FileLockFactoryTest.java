@@ -110,7 +110,9 @@ public class FileLockFactoryTest extends AbstractFileLockFactoryTest {
                     }
                     
                     if (fileLock.hasLock()) {
-                        LOG.debug("Got it..");
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("Got it..");
+                        }
                         assertValidFileLock(fileLock, Thread.currentThread().threadId());
                         runThread = false;
                     } else {
@@ -119,25 +121,35 @@ public class FileLockFactoryTest extends AbstractFileLockFactoryTest {
                 }
 
                 assertTrue(fileLock.hasLock());
-                LOG.debug("Valid: " + fileLock);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Valid: " + fileLock);
+                }
                 
                 try {
                     Thread.sleep(4000);
                 } catch (InterruptedException e) {
-                    LOG.debug("Interrupted: " + e.getMessage(), e);
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Interrupted: " + e.getMessage(), e);
+                    }
                     // NOP
                 }
 
                 assertFalse(fileLock.hasLock());
                 
                 try {
-                    LOG.debug("Release losed lock: " + fileLock);
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Release losed lock: " + fileLock);
+                    }
                     fileLock.close();
                 } catch (Exception e) {
-                    LOG.debug("Error occured:" + e.getMessage(), e);
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Error occured:" + e.getMessage(), e);
+                    }
                 }
                 
-                LOG.debug("End thread.");
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("End thread.");
+                }
             }
         };
         
@@ -151,14 +163,20 @@ public class FileLockFactoryTest extends AbstractFileLockFactoryTest {
             
         }
         
-        LOG.debug("TEST.");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("TEST.");
+        }
         assertValidFileLock(fileLock);
         
         try {
-            LOG.debug("Release lock: " + fileLock);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Release lock: " + fileLock);
+            }
             fileLock.close();
         } catch (Exception e) {
-            LOG.debug("Error occured:" + e.getMessage(), e);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Error occured:" + e.getMessage(), e);
+            }
         }
     }
 }

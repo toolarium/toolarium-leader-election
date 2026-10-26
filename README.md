@@ -13,7 +13,7 @@ A Java library for leader election across distributed nodes. It provides a unifi
 |---|---|---|
 | `FILE` | OS-level file lock on a shared filesystem | none |
 | `NETWORK` | JGroups cluster membership (UDP multicast) | `org.jgroups:jgroups` |
-| `KUBERNETES` | Kubernetes lease / endpoints lock | `io.kubernetes:client-java` + `client-java-extended` |
+| `KUBERNETES` | Kubernetes Lease lock (`coordination.k8s.io`) | `io.kubernetes:client-java` + `client-java-extended` |
 | `DATABASE` | JDBC optimistic locking against a shared table | JDBC driver for your database |
 
 A strategy must always be specified explicitly; the factory will throw if none is provided.
@@ -236,7 +236,7 @@ elector.runIfLeader("do-work", lease -> {
 
 | Strategy | How `elect()` unblocks |
 |---|---|
-| `DATABASE` | The first election tick fires immediately in the scheduler thread (`initialDelay = 0`). `elect()` blocks until that tick completes and returns `isLeader()`. `elect(Duration)` returns `false` if the timeout elapses before the first tick finishes; use a timeout of at least one `retryPeriod` (or a few seconds) to give the tick time to complete, especially against remote databases or pools with an acquisition timeout. |
+| `DATABASE` | The first election tick runs immediately on a shared worker thread. `elect()` blocks until that tick completes and returns `isLeader()`. `elect(Duration)` returns `false` if the timeout elapses before the first tick finishes; use a timeout of at least one `retryPeriod` (or a few seconds) to give the tick time to complete, especially against remote databases or pools with an acquisition timeout. |
 | `FILE` | Blocks until the file lock is acquired or confirmed unavailable (~200 ms). |
 | `NETWORK` | Leadership determined from the initial JGroups membership view. Returns immediately when elected; otherwise blocks until the result is confirmed (up to `timeout`). |
 | `KUBERNETES` | Blocks until the background update thread delivers the first leadership callback. |
@@ -257,6 +257,8 @@ ILeaderElector leaderElector = LeaderElectionFactory.getInstance().getLeaderElec
 ```
 
 ### FILE strategy with custom path
+
+The lock file is `<basePath>/<namespace>.<name>.lock`. Characters other than letters, digits, `.`, `-` and `_` are replaced by `_`, so the lock file is always created directly in the base path; in that case a short hash of the original name is appended (`<namespace>.<name>-<hash>.lock`), so different names never share a lock file. A lock held by another process is tried again once per retry period.
 
 Via builder (recommended):
 
@@ -291,6 +293,65 @@ ILeaderElector leaderElector = LeaderElectionFactory.builder()
 
 leaderElector.elect();
 ```
+
+The coordinator of the JGroups cluster view is the leader. During a network partition each side forms its own view, so by default each side has its own leader until the partitions merge again. To prevent this, set `minimumMembers` to a majority of the expected cluster size (`n / 2 + 1`): a node only leads while its view contains at least that many members, so a minority partition has no leader.
+
+```java
+// 3-node cluster: a node only leads while it sees at least 2 members
+ILeaderElector leaderElector = LeaderElectionFactory.builder()
+    .namespace("namespace").name("my-service").identity("node-1")
+    .network().minimumMembers(2).build();
+```
+
+In addition, every member sends a heartbeat to the coordinator it sees once per retry period, and the coordinator only confirms its lead while it receives them: from at least one other member, or from `minimumMembers - 1` members with a quorum. `isLeader()` returns `false` when the lead was not confirmed within the renew deadline, e.g. when a node comes back from a long JVM pause with an outdated view while the others chose a new coordinator.
+
+**Security:** by default the cluster is neither authenticated nor encrypted, so any host on the network can join it and take the lead; an info message is logged in this case. Set a shared encryption key: all cluster messages are then encrypted, and a node without the key can neither read them nor join the cluster. All nodes need the same key.
+
+```bash
+# create the shared key once and distribute the file to all nodes
+keytool -genseckey -alias leader-election -keyalg AES -keysize 256 -storetype PKCS12 -keystore leader-election.p12 -storepass <password>
+```
+
+```java
+char[] password = ...; // e.g. from a secret store
+ILeaderElector leaderElector = LeaderElectionFactory.builder()
+    .namespace("namespace").name("my-service").identity("node-1")
+    .network().encryptionKey("/etc/my-service/leader-election.p12", password, "leader-election").build();
+Arrays.fill(password, ' '); // the password is no longer needed
+```
+
+A `javax.crypto.SecretKey` can also be passed directly, e.g. from a secret store: `.network().encryptionKey(secretKey)`.
+
+For full control, `.network().configuration("my-jgroups.xml")` replaces the default JGroups protocol stack (a file, classpath resource or URL), e.g. to use TCP instead of UDP multicast, bind to a specific network interface or add other JGroups security protocols. An encryption key can be combined with a custom configuration, as long as the configuration has no encryption protocol of its own.
+
+### KUBERNETES strategy
+
+```java
+ILeaderElector leaderElector = LeaderElectionFactory.builder()
+    .namespace("my-namespace").name("my-service").identity(System.getenv("HOSTNAME"))
+    .kubernetes().build();
+
+leaderElector.elect();
+```
+
+The lock is a Lease named after `name` in the Kubernetes namespace `namespace`. `isLeader()` returns `false` when the lease was not renewed within the renew deadline, even while the Kubernetes client still reports the lead. The service account of the pods needs these permissions:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: leader-election
+  namespace: my-namespace
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+```
+
+**Upgrading from 1.2.x:** releases up to 1.2.x lock an Endpoints object instead. Nodes with different lock types do not see each other's lock, so during a rolling upgrade an old and a new node could both lead. Either stop all old pods before the new ones start (Deployment strategy `Recreate`), or upgrade in two steps:
+
+1. Deploy 1.3.0 with `.kubernetes().lockType(KubernetesLockType.ENDPOINTS)`; the existing RBAC rules for `endpoints` still apply.
+2. Once all pods run 1.3.0, add the `leases` rule above, remove the `lockType` line and deploy again. The Endpoints permissions can then be removed.
 
 ### DATABASE strategy
 
@@ -337,7 +398,7 @@ The library creates and manages the required `LeaderElection` table automaticall
 > Expected columns: `id VARCHAR(36)`, `name VARCHAR(512)`, `instance VARCHAR(255)`, `username VARCHAR(255)`, `lease_ts BIGINT NOT NULL`, `force_release_deadline BIGINT NULL` (primary key on `name`).
 
 > **Connection pool requirement**
-> Each election tick borrows one connection from the `DataSource`. Ensure the pool is configured with a **connection-acquisition timeout** (e.g. HikariCP `connectionTimeout`, Agroal `acquisition-timeout`). An unbounded wait blocks the scheduler thread indefinitely, delaying step-down detection.
+> Each election tick borrows one connection from the `DataSource`. Ensure the pool is configured with a **connection-acquisition timeout** (e.g. HikariCP `connectionTimeout`, Agroal `acquisition-timeout`). An unbounded wait blocks the elector's election tick indefinitely, delaying step-down detection.
 > The minimum recommended `renewDeadline` is **3 seconds**: each tick issues up to 3 sequential statements, each with a 1-second minimum JDBC timeout; at shorter values the total per-tick latency can exceed the renew deadline.
 
 For databases with higher latency (e.g., Oracle), use the explicit `Duration` constructor to control `timeout`, `renewDeadline`, and `retryPeriod` independently:
@@ -349,7 +410,7 @@ DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfigura
     Duration.ofSeconds(5));
 ```
 
-If the database becomes temporarily unavailable, the DATABASE strategy applies exponential back-off (capped at 60 s) so scheduler threads do not hammer a down database.
+If the database becomes temporarily unavailable, the DATABASE strategy applies exponential back-off (capped at 60 s) so election ticks do not hammer a down database.
 
 #### Database-specific SQL structures
 
@@ -395,10 +456,10 @@ config.setLeaderElectionDatabaseStructure(structure);
 
 | Parameter | Default | Description |
 |---|---|---|
-| `timeout` | 10 s | How long a lease is valid. Another node can take over after this elapses. |
-| `renewDeadline` | 5 s | The leader must renew its lease within this duration. Must be < `timeout`. |
-| `retryPeriod` | 5 s | How often candidates attempt to acquire or renew the lease. Must be ≤ `renewDeadline`. |
-| `closeTimeout` | 5 s | Maximum time to wait for a clean shutdown when `close()` is called. |
+| `timeout` | 15 s | How long a lease is valid. Another node can take over after this elapses. |
+| `renewDeadline` | 10 s | The leader must renew its lease within this duration. Must be < `timeout`, with a gap of at least min(1 s, `timeout` / 4). |
+| `retryPeriod` | 5 s | How often candidates attempt to acquire or renew the lease. Must be < `renewDeadline`. |
+| `closeTimeout` | 5 s | Maximum time `close()` waits for running leader tasks. Tasks that still run afterwards keep the lock: it is released once they ended, so no other node takes the lead meanwhile. |
 
 The convenience constructor `new LeaderElectionConfiguration(timeoutInSeconds)` computes `renewDeadline` and `retryPeriod` automatically from the timeout value. The no-arg constructor defaults to (10 s / 5 s / 5 s).
 
@@ -406,6 +467,11 @@ The convenience constructor `new LeaderElectionConfiguration(timeoutInSeconds)` 
 // Override close timeout if your shutdown budget is tight
 config.setCloseTimeout(Duration.ofSeconds(2));
 ```
+
+
+### Threads
+
+All electors of a JVM share a few daemon threads: one timer, one lease monitor, and a worker pool that runs election rounds and lease extensions. Workers are only created while rounds run and end after 60 s idle, so the thread count does not grow with the number of electors, and a slow elector does not delay the others. The rounds of electors started at the same time are spread over the retry period, so they do not borrow database connections all at once. A round that hangs, e.g. in a connection pool without a connection timeout, is reported as a warning; configure the pool's connection timeout below the renew deadline. While a worker runs a round it carries the elector's name, e.g. `leader-election-db-<namespace>.<name>`. The NETWORK strategy additionally runs one JGroups stack per elector and the KUBERNETES strategy the threads of the Kubernetes client, so keep the number of NETWORK and KUBERNETES electors per JVM small.
 
 
 ## Administration API
@@ -447,7 +513,7 @@ For the **DATABASE** strategy `getElectors()` returns leaders held by **all node
 boolean released = admin.forceRelease("elector-uuid");
 ```
 
-For a **local** elector `forceRelease` calls `close()`; the elector stops and relinquishes its lock or database row. For a **remote DATABASE** leader the row is deleted from the shared database table directly so another node can claim leadership without waiting for the lease to expire.
+For a **local** elector `forceRelease` calls `close()`; the elector stops and relinquishes its lock or database row. For a **remote DATABASE** leader a release deadline (now + renew deadline) is written to its row: the leader steps down on its next round, and after the deadline another node takes over. The released node stays away from the lead for one more timeout, so it does not win the lead back; only if no other node takes over in that time, it takes the lead back.
 
 `forceRelease(null)`, `forceRelease("")`, and `forceRelease("unknown-id")` return `false` without throwing.
 
@@ -477,7 +543,8 @@ Runs the full test suite including container-based integration tests. Requires D
 | `MariaDBLeaderElectionTest` | MariaDB |
 | `OracleLeaderElectionTest` | Oracle |
 | `SQLServerLeaderElectionTest` | SQL Server |
-| `KubernetesLeaderElectionTest` | k3s (lightweight Kubernetes) |
+| `KubernetesLeaderElectionTest` | k3s (lightweight Kubernetes), Lease lock |
+| `KubernetesEndpointsLeaderElectionTest` | k3s (lightweight Kubernetes), Endpoints lock |
 
 Each integration test starts its own container via [Testcontainers](https://testcontainers.com/), runs the full leader-election lifecycle against a real database or Kubernetes cluster, then tears the container down. Oracle has a longer cold-start time; allow several minutes for that container to become ready.
 

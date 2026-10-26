@@ -60,8 +60,10 @@ public final class FileLockFactory {
                      */
                     @Override
                     public void run() {
+                        // The locks are not released here: shutdown hooks run concurrently, so leader tasks may still run
+                        // while the electors are closed by their own hook, which releases each lock once its tasks ended.
+                        // The operating system releases all remaining locks when the process exits.
                         shutdownSchedule();
-                        cleanupFileLockMap();
                     }
                 });
     }
@@ -124,7 +126,21 @@ public final class FileLockFactory {
      * @return return the file lock otherwise the {@link FileLockException} will be thrown. The file lock must be closed to free up resources.
      */
     public FileLock tryLock(final File file, Duration lockPeriod, Duration renewDeadline) {
-        FileLock fileLock = new FileLock(file, lockPeriod, renewDeadline);
+        return tryLock(file, lockPeriod, renewDeadline, null);
+    }
+
+
+    /**
+     * Get a file lock that is renewed, and tried again after the retry period while another process holds it.
+     *
+     * @param file the file to lock
+     * @param lockPeriod the lock period. If it's null then the lock will be hold until restart of the jvm.
+     * @param renewDeadline the renew deadline where the lock period has to be renewed. If it's null then the lock will not be renewed after the lock period.
+     * @param retryPeriod the period after which a lock that is not held is tried again, or null to try on every check
+     * @return return the file lock. The file lock must be closed to free up resources.
+     */
+    public FileLock tryLock(final File file, Duration lockPeriod, Duration renewDeadline, Duration retryPeriod) {
+        FileLock fileLock = new FileLock(file, lockPeriod, renewDeadline, retryPeriod);
         fileLockMap.put(fileLock, ThreadUtil.getInstance().getThreadId());
 
         try {
@@ -146,9 +162,9 @@ public final class FileLockFactory {
             return;
         }
 
+        fileLockMap.remove(fileLock);
         try {
             fileLock.close();
-            fileLockMap.remove(fileLock);
         } catch (Exception e) {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("File lock [" + fileLock.getId() + "]  [" + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
@@ -188,6 +204,10 @@ public final class FileLockFactory {
                     }
                     
                     if (fileLock.getRenewDeadline() != null) {
+                        if (lockInstant == null && !fileLock.isRetryDue()) {
+                            // not held: try again only after the retry period
+                            continue;
+                        }
                         if (now - (lockTime + fileLock.getRenewDeadline().toMillis()) > 0) {
                             try {
                                 if (LOG.isDebugEnabled()) {
@@ -229,7 +249,13 @@ public final class FileLockFactory {
         if (LOG.isDebugEnabled()) {
             LOG.debug("Start scheduler with interval of " + scheduleInterval + " seconds.");
         }
-        scheduledExecuterService = Executors.newScheduledThreadPool(1);
+        // Daemon thread: a non-daemon scheduler thread would keep the JVM alive after main() returns,
+        // and the shutdown hook that stops it only runs once the JVM has started to exit.
+        scheduledExecuterService = Executors.newScheduledThreadPool(1, runnable -> {
+            Thread thread = new Thread(runnable, "leader-election-file-lock");
+            thread.setDaemon(true);
+            return thread;
+        });
         scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(new FileLockHandler(), 0, scheduleInterval, TimeUnit.SECONDS);
     }
 
@@ -266,31 +292,6 @@ public final class FileLockFactory {
         
         if (LOG.isDebugEnabled()) {
             LOG.debug("Stopped the scheduler.");
-        }
-    }
-    
-
-    /**
-     * Cleanup the file lock map
-     */
-    private void cleanupFileLockMap() {
-        if (fileLockMap != null) {
-            for (FileLock fileLock : fileLockMap.keySet()) {
-                try {
-                    if (fileLock.hasLock()) {
-                        if (LOG.isDebugEnabled()) {
-                            LOG.debug("Clean file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + ".");
-                        }
-                    }
-                    fileLock.close();
-                    
-                } catch (Exception e) {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug("File lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] on " + fileLock.getLockTime() + " could not be removed: " + e.getMessage(), e);
-                    }
-                    LOG.info("File lock [{}] [{}] on {} could not be removed: {}, lock will expire automatically.", fileLock.getId(), fileLock.getFile(), fileLock.getLockTime(), e.getMessage());
-                }
-            }
         }
     }
 }

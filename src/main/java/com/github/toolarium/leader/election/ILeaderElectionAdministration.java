@@ -59,6 +59,10 @@ public interface ILeaderElectionAdministration {
      * Since {@code renewDeadline >= retryPeriod} (by configuration constraint), the new leader
      * always acquires after the old holder has stepped down; no overlap.
      *
+     * <p><b>Handover:</b> the released node does not compete for the lead until one {@code timeout}
+     * after the deadline, so another node takes over. If no other node takes the lead in that time,
+     * the released node takes it back.
+     *
      * <p><b>Access control:</b> this API is intentionally unrestricted at the framework level.
      * Any code in the JVM that holds a reference to the {@link ILeaderElectionAdministration}
      * singleton can release any elector, including electors from other subsystems.

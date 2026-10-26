@@ -44,4 +44,17 @@ public class MySQLLeaderElectionDatabaseStructure extends JDBCLeaderElectionData
     public String createSQLRenameTimestampColumn() {
         return "ALTER TABLE " + getTableName() + " RENAME COLUMN `timestamp` TO lease_ts";
     }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure#createSQLSelectCurrentTimestampMillis()
+     *     {@code CURRENT_TIMESTAMP} is a zone-less DATETIME in the session time zone; reading it via
+     *     {@code ResultSet.getTimestamp()} interprets it in the JVM time zone, so nodes running in
+     *     different time zones would compute different lease clocks. {@code UNIX_TIMESTAMP()} converts
+     *     on the server side and returns the epoch value directly.
+     */
+    @Override
+    public String createSQLSelectCurrentTimestampMillis() {
+        return "SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED)";
+    }
 }

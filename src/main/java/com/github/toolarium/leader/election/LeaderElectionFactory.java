@@ -12,6 +12,9 @@ import com.github.toolarium.leader.election.dto.LeaderElectionStrategy;
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.file.FileLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.dto.kubernetes.KubernetesLeaderElectionConfiguration;
+import com.github.toolarium.leader.election.dto.kubernetes.KubernetesLockType;
+import com.github.toolarium.leader.election.dto.network.NetworkLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.LeaderElectionScheduler;
 import com.github.toolarium.leader.election.impl.database.DatabaseLeaderElectorImpl;
@@ -20,6 +23,7 @@ import com.github.toolarium.leader.election.impl.kubernetes.KubernetesLeaderElec
 import com.github.toolarium.leader.election.impl.network.NetworkLeaderElectorImpl;
 import java.time.Duration;
 import java.util.Collection;
+import javax.crypto.SecretKey;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -100,7 +104,7 @@ public final class LeaderElectionFactory {
      *         .namespace("ns").name("app").identity("node-1")
      *         .database().dataSource(ds).build();
      *
-     *     // NETWORK or KUBERNETES (no extra options)
+     *     // NETWORK (optional minimumMembers) or KUBERNETES (optional lockType)
      *     ILeaderElector e = LeaderElectionFactory.builder()
      *         .namespace("ns").name("app").identity("node-1")
      *         .network().build();
@@ -185,7 +189,15 @@ public final class LeaderElectionFactory {
 
             case NETWORK:
                 LOG.info("Use network leader elector.");
-                leaderElector = new NetworkLeaderElectorImpl(leaderElectionInformation, leaderElectionConfiguration);
+                NetworkLeaderElectionConfiguration networkLeaderElectionConfiguration = null;
+                if (leaderElectionConfiguration instanceof NetworkLeaderElectionConfiguration) {
+                    networkLeaderElectionConfiguration = (NetworkLeaderElectionConfiguration)leaderElectionConfiguration;
+                } else {
+                    networkLeaderElectionConfiguration = new NetworkLeaderElectionConfiguration(leaderElectionConfiguration.getTimeout(), leaderElectionConfiguration.getRenewDeadline(), leaderElectionConfiguration.getRetryPeriod());
+                    networkLeaderElectionConfiguration.setCloseTimeout(leaderElectionConfiguration.getCloseTimeout());
+                }
+
+                leaderElector = new NetworkLeaderElectorImpl(leaderElectionInformation, networkLeaderElectionConfiguration);
                 break;
 
             case KUBERNETES:
@@ -398,14 +410,8 @@ public final class LeaderElectionFactory {
                 // When only timeout is set, derive renewDeadline and retryPeriod from it
                 // so the defaults (based on 10 s) do not violate the validation constraints.
                 if (renewDeadline == null && retryPeriod == null) {
-                    long secs = timeout.toSeconds();
-                    Duration derivedRetry = timeout.dividedBy(2);
-                    Duration derivedRenew = Duration.ofSeconds(secs - derivedRetry.toSeconds());
-                    if (derivedRenew.toSeconds() <= derivedRetry.toSeconds()) {
-                        derivedRenew = derivedRenew.plus(derivedRenew.dividedBy(2));
-                    }
-                    config.setRetryPeriod(derivedRetry);
-                    config.setRenewDeadline(derivedRenew);
+                    config.setRetryPeriod(LeaderElectionConfiguration.deriveRetryPeriod(timeout));
+                    config.setRenewDeadline(LeaderElectionConfiguration.deriveRenewDeadline(timeout));
                 }
             }
             if (renewDeadline != null) {
@@ -549,6 +555,9 @@ public final class LeaderElectionFactory {
      */
     public static final class NetworkBuilder {
         private final Builder parent;
+        private int minimumMembers = NetworkLeaderElectionConfiguration.DEFAULT_MINIMUM_MEMBERS;
+        private String configuration;
+        private SecretKey encryptionKey;
 
 
         /**
@@ -562,13 +571,73 @@ public final class LeaderElectionFactory {
 
 
         /**
+         * Set the minimum number of cluster members required to take the lead (quorum).
+         * Use a majority of the expected cluster size ({@code n / 2 + 1}) to prevent two leaders
+         * during a network partition. Default is 1 (no quorum).
+         *
+         * @param minimumMembers the minimum number of cluster members, at least 1
+         * @return this builder
+         */
+        public NetworkBuilder minimumMembers(int minimumMembers) {
+            this.minimumMembers = minimumMembers;
+            return this;
+        }
+
+
+        /**
+         * Set a custom JGroups configuration that replaces the default protocol stack, e.g. to use TCP,
+         * a specific network interface or other security protocols.
+         *
+         * @param configuration the JGroups configuration (file, classpath resource or URL)
+         * @return this builder
+         */
+        public NetworkBuilder configuration(String configuration) {
+            this.configuration = configuration;
+            return this;
+        }
+
+
+        /**
+         * Encrypt all cluster messages with a shared key. A node without the key can neither read the
+         * messages nor join the cluster. All nodes of the cluster need the same key.
+         *
+         * @param encryptionKey the shared secret key
+         * @return this builder
+         */
+        public NetworkBuilder encryptionKey(SecretKey encryptionKey) {
+            this.encryptionKey = encryptionKey;
+            return this;
+        }
+
+
+        /**
+         * Encrypt all cluster messages with a shared key read from a keystore (PKCS12 or JCEKS). A node without
+         * the key can neither read the messages nor join the cluster. All nodes of the cluster need the same key.
+         * The password array is not changed; the caller can clear it afterwards.
+         *
+         * @param keystore the keystore file
+         * @param password the password of the keystore and the key
+         * @param alias the alias of the secret key entry
+         * @return this builder
+         * @throws IllegalArgumentException In case the key could not be read
+         */
+        public NetworkBuilder encryptionKey(String keystore, char[] password, String alias) throws IllegalArgumentException {
+            this.encryptionKey = NetworkLeaderElectionConfiguration.loadEncryptionKey(keystore, password, alias);
+            return this;
+        }
+
+
+        /**
          * Build the NETWORK leader elector.
          *
          * @return the leader elector
          * @throws LeaderElectionException In case of an initialisation error
          */
         public ILeaderElector build() throws LeaderElectionException {
-            LeaderElectionConfiguration config = parent.buildBaseConfig(new LeaderElectionConfiguration());
+            NetworkLeaderElectionConfiguration config = parent.buildBaseConfig(new NetworkLeaderElectionConfiguration());
+            config.setMinimumMembers(minimumMembers);
+            config.setConfiguration(configuration);
+            config.setEncryptionKey(encryptionKey);
             return LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.NETWORK, parent.buildInfo(), config);
         }
     }
@@ -581,6 +650,7 @@ public final class LeaderElectionFactory {
      */
     public static final class KubernetesBuilder {
         private final Builder parent;
+        private KubernetesLockType lockType = KubernetesLeaderElectionConfiguration.DEFAULT_LOCK_TYPE;
 
 
         /**
@@ -594,13 +664,28 @@ public final class LeaderElectionFactory {
 
 
         /**
+         * Set the Kubernetes resource that holds the lock. Default is {@link KubernetesLockType#LEASE}.
+         * Use {@link KubernetesLockType#ENDPOINTS} only during a rolling upgrade from 1.2.x, until all
+         * nodes run this release; nodes with different lock types do not see each other's lock.
+         *
+         * @param lockType the lock type
+         * @return this builder
+         */
+        public KubernetesBuilder lockType(KubernetesLockType lockType) {
+            this.lockType = lockType;
+            return this;
+        }
+
+
+        /**
          * Build the KUBERNETES leader elector.
          *
          * @return the leader elector
          * @throws LeaderElectionException In case of an initialisation error
          */
         public ILeaderElector build() throws LeaderElectionException {
-            LeaderElectionConfiguration config = parent.buildBaseConfig(new LeaderElectionConfiguration());
+            KubernetesLeaderElectionConfiguration config = parent.buildBaseConfig(new KubernetesLeaderElectionConfiguration());
+            config.setLockType(lockType);
             return LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.KUBERNETES, parent.buildInfo(), config);
         }
     }

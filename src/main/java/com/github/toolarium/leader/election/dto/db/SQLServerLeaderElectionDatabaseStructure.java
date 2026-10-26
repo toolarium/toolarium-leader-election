@@ -53,4 +53,17 @@ public class SQLServerLeaderElectionDatabaseStructure extends JDBCLeaderElection
     public String createSQLRenameTimestampColumn() {
         return "EXEC sp_rename '[" + getTableName() + "].[timestamp]', 'lease_ts', 'COLUMN'";
     }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure#createSQLSelectCurrentTimestampMillis()
+     *     {@code CURRENT_TIMESTAMP} is the server's local time without zone information; reading it via
+     *     {@code ResultSet.getTimestamp()} interprets it in the JVM time zone, so nodes running in
+     *     different time zones would compute different lease clocks. The epoch value is computed from
+     *     UTC on the server side instead ({@code DATEDIFF_BIG} requires SQL Server 2016 or later).
+     */
+    @Override
+    public String createSQLSelectCurrentTimestampMillis() {
+        return "SELECT DATEDIFF_BIG(MILLISECOND, '1970-01-01', SYSUTCDATETIME())";
+    }
 }

@@ -34,9 +34,13 @@ public abstract class AbstractFileLockFactoryTest {
      */
     @BeforeEach
     public void setUp(TestInfo testInfo) {
-        LOG.debug("\n---- " + testInfo.getTestClass().get().getCanonicalName() + "#" + testInfo.getDisplayName() + " ----");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("\n---- " + testInfo.getTestClass().get().getCanonicalName() + "#" + testInfo.getDisplayName() + " ----");
+        }
         FileLockFactory.getInstance().setScheduleInterval(1);
-        LOG.debug("RESTART");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("RESTART");
+        }
 
         try {
             Thread.sleep(1000);
@@ -62,7 +66,9 @@ public abstract class AbstractFileLockFactoryTest {
             assertNull(fileLock.getLockPeriod());
             assertNull(fileLock.getRenewDeadline());
         } catch (FileLockException e) {
-            LOG.debug("Error :" + e.getMessage(), e);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Error :" + e.getMessage(), e);
+            }
             fail();
         }
         

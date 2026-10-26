@@ -21,6 +21,8 @@ import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.database.dao.LeaderElectionDAO;
 import java.io.PrintWriter;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -30,6 +32,7 @@ import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import javax.sql.DataSource;
 import org.h2.jdbcx.JdbcDataSource;
@@ -456,10 +459,10 @@ public class DatabaseLeaderElectorFixesTest {
     // -----------------------------------------------------------------------
 
     /**
-     * Verify that the background scheduler thread created by {@link DatabaseLeaderElectorImpl}:
+     * Verify that the election ticks of {@link DatabaseLeaderElectorImpl} run on a shared worker thread that:
      * <ol>
      *   <li>is a <em>daemon</em> thread so the JVM can exit without waiting for it, and</li>
-     *   <li>is named {@code "leader-election-db-<electionGroupName>"} for easy identification.</li>
+     *   <li>is named {@code "leader-election-db-<electionGroupName>"} while the tick runs, for easy identification.</li>
      * </ol>
      *
      * @throws Exception in case of an error
@@ -467,30 +470,34 @@ public class DatabaseLeaderElectorFixesTest {
     @Test
     public void testSchedulerThreadIsDaemonWithCorrectName() throws Exception {
         String groupName = "daemon-test";
-        JdbcDataSource ds = new JdbcDataSource();
-        ds.setURL("jdbc:h2:mem:daemon_test;DB_CLOSE_DELAY=-1");
-        ds.setUser(DB_USER);
-        ds.setPassword("");
+        JdbcDataSource h2 = new JdbcDataSource();
+        h2.setURL("jdbc:h2:mem:daemon_test;DB_CLOSE_DELAY=-1");
+        h2.setUser(DB_USER);
+        h2.setPassword("");
+
+        // record the thread of the first connection request of a tick
+        String expectedName = "leader-election-db-" + groupName;
+        AtomicReference<Thread> tickThread = new AtomicReference<>();
+        DataSource ds = (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(), new Class<?>[] {DataSource.class}, (proxy, method, args) -> {
+            if ("getConnection".equals(method.getName()) && Thread.currentThread().getName().equals(expectedName)) {
+                tickThread.compareAndSet(null, Thread.currentThread());
+            }
+            try {
+                return method.invoke(h2, args);
+            } catch (InvocationTargetException e) {
+                throw e.getCause();
+            }
+        });
 
         ILeaderElector elector = createElector(ds, groupName, 2);
-        assertTrue(elector.elect());
-        Thread.sleep(50L); // give the scheduler thread time to start
-
-        String expectedName = "leader-election-db-" + groupName;
-        Thread found = null;
-        for (Thread t : Thread.getAllStackTraces().keySet()) {
-            if (t.getName().equals(expectedName)) {
-                found = t;
-                break;
-            }
+        try {
+            assertTrue(elector.elect());
+            Thread found = tickThread.get();
+            assertNotNull(found, "The election tick must run on a thread named '" + expectedName + "'");
+            assertTrue(found.isDaemon(), "The tick thread must be a daemon so it does not prevent JVM shutdown");
+        } finally {
+            elector.close();
         }
-
-        assertNotNull(found,
-                "Scheduler thread '" + expectedName + "' must appear in the active thread list");
-        assertTrue(found.isDaemon(),
-                "Scheduler thread must be a daemon so it does not prevent JVM shutdown");
-
-        elector.close();
     }
 
 

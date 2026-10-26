@@ -73,7 +73,9 @@ public class LeaderElectionDAOTest {
 
         // read and verify
         LeaderElectorRecord readLeaderElectorRecord = leaderElectionDAO.selectLeaderByName(MYTEST);
-        LOG.debug("Read: " + leaderElectorRecord);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Read: " + leaderElectorRecord);
+        }
         assertEquals(leaderElectorRecord, readLeaderElectorRecord);
 
         assertNotNull(leaderElectorRecord);

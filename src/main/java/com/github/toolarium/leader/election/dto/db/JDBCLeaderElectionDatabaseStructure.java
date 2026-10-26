@@ -80,6 +80,15 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
 
 
     /**
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLDeleteLeaderRecord()
+     */
+    @Override
+    public String createSQLDeleteLeaderRecord() {
+        return "DELETE FROM " + getTableName() + " WHERE name = ? AND instance = ? AND id = ?";
+    }
+
+
+    /**
      * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#createSQLDeleteLeaderByInstance()
      */
     @Override

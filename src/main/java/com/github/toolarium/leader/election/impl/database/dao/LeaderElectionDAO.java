@@ -271,6 +271,28 @@ public class LeaderElectionDAO {
 
 
     /**
+     * Delete the row of this instance only while it still holds the given record id. A row that was renewed since, e.g. by
+     * the same elector after it was elected again, keeps its lead.
+     *
+     * @param name the name
+     * @param instanceId the stable elector instance id
+     * @param recordId the record id written last
+     * @return the number of deleted records
+     * @throws SQLException In case of a database error
+     */
+    public int deleteLeaderRecord(String name, String instanceId, String recordId) throws SQLException {
+        try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
+            PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderRecord())) {
+            stmt.setQueryTimeout(queryTimeoutSeconds);
+            JDBCUtil.getInstance().setValues(stmt, new Object[] {name, instanceId, recordId});
+            int rows = stmt.executeUpdate();
+            commitIfNeeded(conn);
+            return rows;
+        }
+    }
+
+
+    /**
      * Select the current leader for the given election group name.
      *
      * @param name the election group name
@@ -466,6 +488,12 @@ public class LeaderElectionDAO {
                 stmt.setQueryTimeout(queryTimeoutSeconds);
                 try (ResultSet rs = stmt.executeQuery(leaderElectionDatabaseStructure.createSQLSelectCurrentTimestampMillis())) {
                     if (rs.next()) {
+                        // Dialects that cannot return a zone-aware TIMESTAMP compute epoch millis on the
+                        // server and return a number; others return a TIMESTAMP (WITH TIME ZONE).
+                        Object value = rs.getObject(1);
+                        if (value instanceof Number) {
+                            return ((Number) value).longValue();
+                        }
                         Timestamp ts = rs.getTimestamp(1);
                         if (ts != null) {
                             return ts.getTime();

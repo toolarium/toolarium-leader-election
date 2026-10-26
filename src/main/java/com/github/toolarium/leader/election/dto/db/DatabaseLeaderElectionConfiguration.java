@@ -277,6 +277,17 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
 
 
         /**
+         * Create the statement that deletes the row of this instance only while it still holds the given record id, i.e. was
+         * not renewed since. Parameters: name, instance, id
+         *
+         * @return the delete statement
+         */
+        public String createSQLDeleteLeaderRecord() {
+            return "DELETE FROM " + getTableName() + " WHERE name = ? AND instance = ? AND id = ?;";
+        }
+
+
+        /**
          * Create the delete-by-instance statement of the leader election table.
          * Deletes the row for the given stable elector instance id regardless of election group name.
          * Used by the administration API to force-release a remote leader in a single round-trip.
@@ -364,9 +375,10 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
 
 
         /**
-         * Create the query that returns the database server's current time as a TIMESTAMP.
-         * The caller reads column 1 as a {@code java.sql.Timestamp} and converts via
-         * {@code Timestamp.getTime()} to epoch milliseconds.
+         * Create the query that returns the database server's current time. Column 1 may either be a
+         * numeric epoch-milliseconds value (preferred, time-zone independent) or a TIMESTAMP that carries
+         * time-zone information; a TIMESTAMP is converted via {@code Timestamp.getTime()}. Do not return
+         * a zone-less local timestamp: it would be interpreted in the JVM time zone.
          *
          * @return the current-timestamp query
          */

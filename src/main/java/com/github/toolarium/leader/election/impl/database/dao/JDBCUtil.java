@@ -20,6 +20,7 @@ import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import org.slf4j.Logger;
@@ -112,7 +113,9 @@ public final class JDBCUtil {
                     // log sql warnings
                     SQLWarning warnings = conn.getWarnings();
                     while (warnings != null) {
-                        LOG.warn(SQLFormatterUtil.getInstance().formatSQLException("A SQL warning occurred", warnings));
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug(SQLFormatterUtil.getInstance().formatSQLException("A SQL warning occurred", warnings));
+                        }
                         warnings = warnings.getNextWarning();
                     }
 
@@ -179,7 +182,7 @@ public final class JDBCUtil {
                     stmnt.setBlob(i + 1, inputStream);
                 } else if (value instanceof Date) {
                     if (LOG.isDebugEnabled()) {  
-                        LOG.debug(SET_DATA_TO_COLUMN + i + "': [" + DateTimeFormatter.ISO_INSTANT.format(((Date)value).toInstant()) + "]");
+                        LOG.debug(SET_DATA_TO_COLUMN + i + "': [" + DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(((Date)value).getTime())) + "]");
                     }
                                             
                     stmnt.setObject(i + 1, value);

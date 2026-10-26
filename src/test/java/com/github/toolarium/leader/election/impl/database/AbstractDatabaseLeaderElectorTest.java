@@ -55,6 +55,26 @@ public abstract class AbstractDatabaseLeaderElectorTest extends AbstractLeaderEl
 
 
     /**
+     * Verify that the database clock query returns the current epoch time independent of the JVM
+     * and database time zones. A zone-less timestamp interpreted in the JVM time zone would be off
+     * by the time zone difference (hours), which breaks lease expiry across nodes.
+     *
+     * @throws Exception In case of an error
+     */
+    @Test
+    public void testDatabaseClockIsEpochMillis() throws Exception {
+        LeaderElectionDAO dao = new LeaderElectionDAO(createConfiguration());
+        long before = System.currentTimeMillis();
+        long dbNow = dao.getDatabaseCurrentTimeMillis();
+        long after = System.currentTimeMillis();
+        // Generous bound for container clock drift; a time zone error is at least 15 minutes.
+        long toleranceMillis = 60_000L;
+        assertTrue(dbNow >= before - toleranceMillis && dbNow <= after + toleranceMillis,
+                "Database clock " + dbNow + " is not within " + toleranceMillis + "ms of local clock " + before);
+    }
+
+
+    /**
      * Verify that {@code init()} auto-migrates the legacy {@code timestamp} column to
      * {@code lease_ts} and that leadership election works correctly after migration.
      *

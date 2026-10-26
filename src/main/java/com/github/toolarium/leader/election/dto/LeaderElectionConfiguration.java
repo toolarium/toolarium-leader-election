@@ -14,6 +14,8 @@ import java.util.Objects;
  * @author patrick
  */
 public class LeaderElectionConfiguration implements ILeaderElectionConfiguration {
+    // Upper bound of the required gap between timeout and renewDeadline; see validate().
+    private static final long MIN_LEASE_SAFETY_MARGIN_MILLIS = 1000L;
     private Duration timeout;
     private Duration renewDeadline;
     private Duration retryPeriod;
@@ -26,7 +28,7 @@ public class LeaderElectionConfiguration implements ILeaderElectionConfiguration
      * @throws IllegalArgumentException In case of a parameter failure
      */
     public LeaderElectionConfiguration() throws IllegalArgumentException {
-        this(Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofSeconds(5));
+        this(Duration.ofSeconds(15), Duration.ofSeconds(10), Duration.ofSeconds(5));
     }
 
     
@@ -38,17 +40,13 @@ public class LeaderElectionConfiguration implements ILeaderElectionConfiguration
      */
     public LeaderElectionConfiguration(long timeoutInSeconds) throws IllegalArgumentException {
         this.timeout = Duration.ofSeconds(timeoutInSeconds);
-        this.retryPeriod = Duration.ofSeconds(timeoutInSeconds).dividedBy(2);
-        this.renewDeadline = Duration.ofSeconds(timeoutInSeconds - retryPeriod.toSeconds());
-        if (renewDeadline.toSeconds() <= retryPeriod.toSeconds()) {
-            this.renewDeadline = renewDeadline.plus(renewDeadline.dividedBy(2));
-        }
+        this.retryPeriod = deriveRetryPeriod(timeout);
+        this.renewDeadline = deriveRenewDeadline(timeout);
         this.closeTimeout = Duration.ofSeconds(5);
         validate();
     }
 
 
-    
     /**
      * Constructor for LeaderElectionConfiguration
      *
@@ -67,6 +65,30 @@ public class LeaderElectionConfiguration implements ILeaderElectionConfiguration
 
 
     /**
+     * Derive the retry period from the timeout: one third of the timeout.
+     *
+     * @param timeout the timeout
+     * @return the retry period
+     */
+    public static Duration deriveRetryPeriod(Duration timeout) {
+        return timeout.dividedBy(3);
+    }
+
+
+    /**
+     * Derive the renew deadline from the timeout: two thirds of the timeout. The renew deadline then
+     * covers two retry periods, so a single slow or failed renewal round does not cost the leadership,
+     * and one third of the timeout remains as margin before another node may take over.
+     *
+     * @param timeout the timeout
+     * @return the renew deadline
+     */
+    public static Duration deriveRenewDeadline(Duration timeout) {
+        return timeout.multipliedBy(2).dividedBy(3);
+    }
+
+
+    /**
      * Validate
      *  
      * @throws IllegalArgumentException In case of a parameter failure
@@ -74,16 +96,30 @@ public class LeaderElectionConfiguration implements ILeaderElectionConfiguration
     public void validate() throws IllegalArgumentException {
         if (timeout == null || timeout.isZero()) {
             throw new IllegalArgumentException("Invalid timeout!");
-        } else if (timeout.toSeconds() < 0) {
+        } else if (timeout.isNegative()) {
             throw new IllegalArgumentException("Too short timeout.");
         }
 
-        if (renewDeadline == null || renewDeadline.isZero() || renewDeadline.toSeconds() >= timeout.toSeconds()) {
+        // Compare the exact Duration values: truncated seconds would accept e.g. renewDeadline 1999 ms
+        // with timeout 2000 ms, or reject renewDeadline 1500 ms with timeout 1999 ms.
+        if (renewDeadline == null || renewDeadline.isZero() || renewDeadline.isNegative() || renewDeadline.compareTo(timeout) >= 0) {
             throw new IllegalArgumentException("Invalid renewDeadline. The renew deadline must be < timeout!");
         }
 
-        if (retryPeriod == null || retryPeriod.isZero() || renewDeadline.toSeconds() < retryPeriod.toSeconds()) {
+        // retryPeriod == renewDeadline would let the leadership expire in every round: the next round
+        // starts exactly when the renew deadline of the previous one runs out.
+        if (retryPeriod == null || retryPeriod.isZero() || retryPeriod.isNegative() || retryPeriod.compareTo(renewDeadline) >= 0) {
             throw new IllegalArgumentException("Invalid retryPeriod. The retry period must be < renewDeadline!");
+        }
+
+        // A leader steps down at renewDeadline, another node takes over at timeout. The gap between
+        // both is the only protection against clock offset between nodes and statement latency;
+        // a gap of a few milliseconds would allow two leaders at the same time.
+        long marginMillis = timeout.toMillis() - renewDeadline.toMillis();
+        long requiredMarginMillis = Math.min(MIN_LEASE_SAFETY_MARGIN_MILLIS, timeout.toMillis() / 4);
+        if (marginMillis < requiredMarginMillis) {
+            throw new IllegalArgumentException("Invalid renewDeadline. The gap between timeout and renewDeadline is " + marginMillis
+                                               + "ms but must be at least " + requiredMarginMillis + "ms (min(1s, timeout / 4))!");
         }
     }
 

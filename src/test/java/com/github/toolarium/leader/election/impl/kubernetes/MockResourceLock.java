@@ -47,7 +47,9 @@ public class MockResourceLock implements Lock {
      */
     public static synchronized void initialize() {
         
-        LOG.debug("INIT");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("INIT");
+        }
         MockResourceLock.lock = new ReentrantLock();
         MockResourceLock.leaderRecord = null;
     }
@@ -70,7 +72,9 @@ public class MockResourceLock implements Lock {
      */
     public static synchronized void setLock(LeaderElectionRecord leaderRecord) {
         
-        LOG.debug("INIT");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("INIT");
+        }
         MockResourceLock.leaderRecord = leaderRecord;
     }
 
@@ -81,7 +85,9 @@ public class MockResourceLock implements Lock {
      * @param renewCountMax the renew count max
      */
     public void setRenewCountMax(int renewCountMax) {
-        LOG.debug("setRenewCountMax");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("setRenewCountMax");
+        }
         this.renewCountMax = renewCountMax;
     }
 
@@ -107,7 +113,9 @@ public class MockResourceLock implements Lock {
     public LeaderElectionRecord get() throws ApiException {
         lock.lock();
         try {
-            LOG.debug("Leader record..." + leaderRecord);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Leader record..." + leaderRecord);
+            }
             return leaderRecord;
         } finally {
             lock.unlock();
@@ -120,7 +128,9 @@ public class MockResourceLock implements Lock {
      */
     @Override
     public boolean create(LeaderElectionRecord record) {
-        LOG.debug("[LOCK CREATE] " + KubernetesUtil.getInstance().toString(record));
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("[LOCK CREATE] " + KubernetesUtil.getInstance().toString(record));
+        }
 
         lock.lock();
         try {
@@ -155,7 +165,9 @@ public class MockResourceLock implements Lock {
             leaderRecord = record;
             
             if (oldRecord != null && oldRecord.getHolderIdentity() != null) {
-                LOG.debug("[LOCK UPDATE] " + KubernetesUtil.getInstance().toString(record));
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("[LOCK UPDATE] " + KubernetesUtil.getInstance().toString(record));
+                }
             }
             
             if (onUpdate != null) {

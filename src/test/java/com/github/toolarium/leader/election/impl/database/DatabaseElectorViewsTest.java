@@ -240,6 +240,64 @@ public class DatabaseElectorViewsTest {
 
 
     /**
+     * Two election groups sharing one table: rows of the other group must carry that group's name, and
+     * the administration view must list every row exactly once (not once per DATABASE elector).
+     *
+     * @throws Exception In case of an error
+     */
+    @Test
+    public void testSharedTableViewsAreLabelledAndDeduplicated() throws Exception {
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:dbview_shared;DB_CLOSE_DELAY=-1");
+        ds.setUser(DB_USER);
+        ds.setPassword("");
+        DatabaseLeaderElectionConfiguration configA = new DatabaseLeaderElectionConfiguration(2);
+        configA.setDataSource(ds);
+        DatabaseLeaderElectionConfiguration configB = new DatabaseLeaderElectionConfiguration(2);
+        configB.setDataSource(ds);
+        ILeaderElector electorA = LeaderElectionFactory.getInstance().getLeaderElection(
+                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("dbview-shared-a"), configA);
+        ILeaderElector electorB = LeaderElectionFactory.getInstance().getLeaderElection(
+                LeaderElectionStrategy.DATABASE, new LeaderElectionInformation("dbview-shared-b"), configB);
+        try {
+            assertTrue(electorA.elect());
+            assertTrue(electorB.elect());
+
+            Collection<ILeaderElectorView> viewsOfA = ((DatabaseLeaderElectorImpl) electorA).getDatabaseElectorViews();
+            ILeaderElectorView rowOfB = findById(viewsOfA, electorB.getId());
+            assertNotNull(rowOfB, "the shared table must contain the row of group B");
+            assertEquals("dbview-shared-b", rowOfB.getLeaderElectionInformation().getElectionGroupName());
+            assertEquals("dbview-shared-a", findById(viewsOfA, electorA.getId()).getLeaderElectionInformation().getElectionGroupName());
+
+            Collection<ILeaderElectorView> all = LeaderElectionFactory.getInstance().getLeaderElectionAdministration().getElectors();
+            assertEquals(1, countById(all, electorA.getId()), "row of group A must be listed exactly once");
+            assertEquals(1, countById(all, electorB.getId()), "row of group B must be listed exactly once");
+        } finally {
+            electorA.close();
+            electorB.close();
+        }
+    }
+
+
+    /**
+     * Count the views in the collection whose id equals the given id.
+     *
+     * @param views the collection of views to search
+     * @param id the id to look for
+     * @return the number of matching views
+     */
+    private int countById(Collection<ILeaderElectorView> views, String id) {
+        int count = 0;
+        for (ILeaderElectorView view : views) {
+            if (id.equals(view.getId())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+
+    /**
      * Returns the first view in the collection whose id equals the given id, or {@code null} if not found.
      *
      * @param views the collection of views to search

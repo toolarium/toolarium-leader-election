@@ -156,8 +156,12 @@ public class KubernetesLeaderElectotionTest extends AbstractLeaderElectorTest {
 
         testLeaderElectionLatch.await(10, TimeUnit.SECONDS);
 
-        LOG.debug("=" + electionHistory);
-        LOG.debug("=" + leadershipHistory);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("=" + electionHistory);
+        }
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("=" + leadershipHistory);
+        }
         assertHistory(electionHistory, "update record", "update record", "update record");
         assertHistory(leadershipHistory, "start leading", "stop leading");
         leaderElector.close();
