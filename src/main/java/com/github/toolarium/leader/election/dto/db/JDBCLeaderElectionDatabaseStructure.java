@@ -5,6 +5,8 @@
  */
 package com.github.toolarium.leader.election.dto.db;
 
+import java.util.Locale;
+
 
 /**
  * Defines the standard database structure without trailing semicolons (compatible with PostgreSQL and standard JDBC).
@@ -38,8 +40,31 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
      */
     @Override
     public String createSQLIndex() {
-        String safeName = getTableName().toLowerCase().replaceAll("[^a-z0-9_]", "_");
-        return "CREATE INDEX idx_" + safeName + "_instance ON " + getTableName() + "(instance)";
+        return "CREATE INDEX idx_" + getSafeName(getTableName()) + "_instance ON " + getTableName() + "(instance)";
+    }
+
+
+    /**
+     * Get the name of the table without a schema prefix, usable as part of a constraint name: lowercase (independent of the
+     * default locale), with every character other than a letter, digit or underscore replaced by an underscore.
+     *
+     * @return the name for constraints
+     */
+    protected String getConstraintBaseName() {
+        String tableName = getTableName();
+        return getSafeName(tableName.substring(tableName.lastIndexOf('.') + 1));
+    }
+
+
+    /**
+     * Get a name usable as part of an identifier: lowercase (independent of the default locale), with every character other
+     * than a letter, digit or underscore replaced by an underscore.
+     *
+     * @param name the name
+     * @return the safe name
+     */
+    protected static String getSafeName(String name) {
+        return name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
     }
 
 
@@ -120,7 +145,7 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
      */
     @Override
     public String createSQLUpdateLeaderTimestamp() {
-        return "UPDATE " + getTableName() + " SET id = ?, lease_ts = ? WHERE name = ? AND instance = ? AND force_release_deadline IS NULL";
+        return "UPDATE " + getTableName() + " SET id = ?, lease_ts = ? WHERE name = ? AND instance = ? AND id = ? AND force_release_deadline IS NULL";
     }
 
 
@@ -131,7 +156,8 @@ public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionC
     public String createSQLStealLeadership() {
         return "UPDATE " + getTableName()
                 + " SET id = ?, instance = ?, username = ?, lease_ts = ?, force_release_deadline = NULL"
-                + " WHERE name = ? AND id = ? AND (lease_ts < ? OR (force_release_deadline IS NOT NULL AND force_release_deadline <= ?))";
+                + " WHERE name = ? AND id = ? AND (lease_ts < ? OR lease_ts > ?"
+                + " OR (force_release_deadline IS NOT NULL AND (force_release_deadline <= ? OR force_release_deadline > ?)))";
     }
 
 

@@ -29,7 +29,7 @@ public class OracleLeaderElectionDatabaseStructure extends JDBCLeaderElectionDat
      */
     @Override
     public String createSQLTable() {
-        String base = getTableName().toLowerCase();
+        String base = getConstraintBaseName();
         String suffix;
         if (base.length() > 27) {
             suffix = base.substring(0, 27);
@@ -61,7 +61,7 @@ public class OracleLeaderElectionDatabaseStructure extends JDBCLeaderElectionDat
      */
     @Override
     public String createSQLIndex() {
-        String base = getTableName().toLowerCase().replaceAll("[^a-z0-9_]", "_");
+        String base = getSafeName(getTableName());
         String suffix;
         if (base.length() > 17) {
             suffix = base.substring(0, 17);

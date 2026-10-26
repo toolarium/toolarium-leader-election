@@ -96,7 +96,7 @@ public class DatabaseForceReleaseTest {
 
 
     /**
-     * A running leader task cannot extend a force-released lease; the elector steps down.
+     * A running leader task cannot extend a force-released lease; the next round, which reads the row, steps down.
      *
      * @throws Exception in case of an error
      */
@@ -116,7 +116,8 @@ public class DatabaseForceReleaseTest {
                 extended.set(lease.tryExtend());
             }));
             assertEquals(Boolean.FALSE, extended.get(), "A released lease must not be extended");
-            assertFalse(leader.isLeader(), "The elector must step down when the extension fails");
+            // the extension cannot tell a release from a concurrent renewal: the next round reads the row and steps down
+            assertTrue(await(() -> !leader.isLeader(), 15000), "The elector must step down on the next round");
         } finally {
             closeQuietly(admin);
             closeQuietly(leader);

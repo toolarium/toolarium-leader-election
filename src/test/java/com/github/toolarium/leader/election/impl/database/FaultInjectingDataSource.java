@@ -48,6 +48,7 @@ final class FaultInjectingDataSource implements DataSource {
     private volatile CountDownLatch blocked;
     private volatile CountDownLatch gate;
     private volatile String failingSql;
+    private volatile String failingSqlState;
 
 
     /**
@@ -81,6 +82,7 @@ final class FaultInjectingDataSource implements DataSource {
         failingThreads = name -> false;
         failDelayMillis = 0;
         failingSql = null;
+        failingSqlState = null;
         skippedRenewals.set(0);
         release();
         blockingThreads = name -> false;
@@ -141,6 +143,19 @@ final class FaultInjectingDataSource implements DataSource {
      * @param sqlFragment the SQL fragment, or null for none
      */
     void failStatements(String sqlFragment) {
+        failStatements(sqlFragment, null);
+    }
+
+
+    /**
+     * Let every statement fail that contains the given SQL fragment, with the given SQLState (e.g. "23505" for a duplicate key
+     * of a driver that does not use SQLIntegrityConstraintViolationException).
+     *
+     * @param sqlFragment the SQL fragment, or null for none
+     * @param sqlState the SQLState, or null
+     */
+    void failStatements(String sqlFragment, String sqlState) {
+        this.failingSqlState = sqlState;
         this.failingSql = sqlFragment;
     }
 
@@ -225,7 +240,7 @@ final class FaultInjectingDataSource implements DataSource {
     private void checkSql(String sql) throws SQLException {
         String fragment = failingSql;
         if (fragment != null && sql != null && sql.contains(fragment)) {
-            throw new SQLException("Simulated statement failure");
+            throw new SQLException("Simulated statement failure", failingSqlState);
         }
     }
 

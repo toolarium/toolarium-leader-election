@@ -18,6 +18,8 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
     private String name;
     private String identity;
     private String username;
+    // cache of getElectionGroupName(), cleared when a part of the name changes
+    private volatile String electionGroupName;
 
 
     /**
@@ -30,6 +32,7 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
     public LeaderElectionInformation(String namespace, String name, String identity) {
         this.namespace = namespace;
         this.name = name;
+        this.electionGroupName = null;
         if (identity != null && !identity.isBlank()) {
             this.identity = identity;
         } else {
@@ -67,6 +70,7 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
      */
     public LeaderElectionInformation setNamespace(String namespace) {
         this.namespace = namespace;
+        this.electionGroupName = null;
         return this;
     }
     
@@ -89,6 +93,7 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
      */
     public LeaderElectionInformation setName(String name) {
         this.name = name;
+        this.electionGroupName = null;
         return this;
     }
     
@@ -111,6 +116,7 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
      */
     public LeaderElectionInformation setIdentity(String identity) {
         this.identity = identity;
+        this.electionGroupName = null;
         return this;
     }
 
@@ -180,6 +186,10 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
      * @return the election group name
      */
     public String getElectionGroupName() {
+        String cached = electionGroupName;
+        if (cached != null) {
+            return cached;
+        }
         String clusterName = "";
         if (getNamespace() != null && !getNamespace().isBlank()) {
             clusterName = getNamespace();
@@ -196,6 +206,7 @@ public class LeaderElectionInformation implements ILeaderElectionInformation {
             clusterName = getIdentity();
         }
 
+        electionGroupName = clusterName;
         return clusterName;
     }
 

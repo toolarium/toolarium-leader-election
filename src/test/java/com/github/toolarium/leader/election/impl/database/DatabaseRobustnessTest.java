@@ -12,11 +12,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.toolarium.leader.election.impl.LogText;
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -126,9 +129,10 @@ public class DatabaseRobustnessTest {
 
             List<Thread> threads = new ArrayList<>();
             for (int i = 0; i < 4; i++) {
+                final String taskName = "robustness-extension-" + i;
                 Thread thread = new Thread(() -> {
                     try {
-                        elector.runIfLeader("robustness-extension-" + Thread.currentThread().getId(), lease -> lease.tryExtend());
+                        elector.runIfLeader(taskName, lease -> lease.tryExtend());
                     } catch (Exception e) {
                         // NOP
                     }
@@ -173,6 +177,63 @@ public class DatabaseRobustnessTest {
 
 
     /**
+     * A leader row of another instance with a lease time far ahead of the database clock (a wrong clock or a manual change)
+     * counts as expired once it stayed unchanged for the lease duration: the node takes the lead instead of waiting until
+     * then. A row with a current lease is kept.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testFutureLeaseIsTakenOver() throws Exception {
+        FaultInjectingDataSource ds = new FaultInjectingDataSource("robustnessFutureLease");
+        DatabaseLeaderElectorImpl first = createElector(ds, "robustness-future-lease", Duration.ofSeconds(3), Duration.ofSeconds(2), Duration.ofMillis(500));
+        DatabaseLeaderElectorImpl second = null;
+        try {
+            // creates the table
+            assertTrue(first.elect(Duration.ofSeconds(10)));
+            first.close();
+            assertTrue(await(() -> rowCount(ds, "robustness-future-lease") == 0, 5000));
+
+            insertRow(ds, "robustness-future-lease", "current-node", System.currentTimeMillis());
+            second = createElector(ds, "robustness-future-lease", Duration.ofSeconds(3), Duration.ofSeconds(2), Duration.ofMillis(500));
+            assertFalse(second.elect(Duration.ofSeconds(2)), "A current lease of another node must be kept");
+            second.close();
+
+            try (Connection connection = ds.getDelegate().getConnection(); Statement stmt = connection.createStatement()) {
+                stmt.execute("DELETE FROM LeaderElection WHERE name = 'robustness-future-lease'");
+            }
+            insertRow(ds, "robustness-future-lease", "clock-ahead-node", System.currentTimeMillis() + TimeUnit.DAYS.toMillis(365));
+            long start = System.nanoTime();
+            second.elect(Duration.ofSeconds(1));
+            // taken over once the row stayed unchanged for the lease duration (3 s), not at once
+            assertTrue(await(second::isLeader, 10000), "A lease a year ahead must be taken over");
+            long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(tookMillis >= 2500, "The row must only be taken over after the lease duration, took " + tookMillis + " ms");
+        } finally {
+            closeQuietly(second);
+            closeQuietly(first);
+        }
+    }
+
+
+    /**
+     * Insert the leader row of another instance.
+     *
+     * @param ds the data source
+     * @param name the election name
+     * @param instance the instance
+     * @param leaseMillis the lease time
+     * @throws Exception in case of an error
+     */
+    private static void insertRow(FaultInjectingDataSource ds, String name, String instance, long leaseMillis) throws Exception {
+        try (Connection connection = ds.getDelegate().getConnection(); Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO LeaderElection (id, name, instance, username, lease_ts) VALUES ('" + UUID.randomUUID() + "', '" + name + "', '"
+                         + instance + "', 'test-user', " + leaseMillis + ")");
+        }
+    }
+
+
+    /**
      * Count the rows of an election.
      *
      * @param ds the data source
@@ -188,5 +249,20 @@ public class DatabaseRobustnessTest {
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+
+    /**
+     * A value read from the table is safe for a log message: no line breaks that could forge log lines, and a limited length.
+     */
+    @Test
+    public void testLogTextOfTableValues() {
+        assertEquals("node-1?2026-10-26 ERROR forged", LogText.getInstance().of("node-1\n2026-10-26 ERROR forged"));
+        StringBuilder longValue = new StringBuilder();
+        for (int i = 0; i < 1000; i++) {
+            longValue.append('x');
+        }
+        assertTrue(LogText.getInstance().of(longValue.toString()).length() < 300);
+        assertEquals(null, LogText.getInstance().of(null));
     }
 }

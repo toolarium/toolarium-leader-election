@@ -5,12 +5,14 @@
  */
 package com.github.toolarium.leader.election.impl;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
@@ -53,6 +55,34 @@ public class LeaderLeaseMonitorTest {
         } finally {
             elector.failure = null;
             elector.close();
+        }
+    }
+
+
+    /**
+     * One shared check runs while tasks run, and stops after a short idle time once no task runs anymore.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testSharedCheckStopsWhenIdle() throws Exception {
+        FailingElector elector = new FailingElector();
+        try {
+            assertTrue(elector.elect(Duration.ofSeconds(1)));
+            AtomicBoolean scheduledWhileRunning = new AtomicBoolean(false);
+            assertTrue(elector.runIfLeader("lease-monitor-shared-check", lease -> scheduledWhileRunning.set(LeaderLeaseMonitor.isSharedCheckScheduled())));
+            assertTrue(scheduledWhileRunning.get(), "The shared check must run while a task runs");
+        } finally {
+            elector.close();
+        }
+
+        // other tests of this JVM may still run tasks: only expect the stop when no monitor is active anymore
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (LeaderLeaseMonitor.isSharedCheckScheduled() && LeaderLeaseMonitor.getActiveMonitorCount() == 0 && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+        if (LeaderLeaseMonitor.getActiveMonitorCount() == 0) {
+            assertFalse(LeaderLeaseMonitor.isSharedCheckScheduled(), "The shared check must stop once no task runs anymore");
         }
     }
 

@@ -222,7 +222,7 @@ elector.runIfLeader("do-work", lease -> {
 |---|---|
 | `isValid()` | Returns `true` if this node still holds the lease. |
 | `verify()` | Throws `LeaderElectionException` if leadership has been lost. Convenient for checkpoint calls inside a long-running task. |
-| `tryExtend()` | Attempts to push the lease deadline further out. Returns `true` on success. For FILE and DATABASE strategies this performs an actual renewal; for NETWORK and KUBERNETES it is a no-op that returns `isLeader()`. |
+| `tryExtend()` | Attempts to push the lease deadline further out. Returns `true` on success. For FILE and DATABASE strategies this performs an actual renewal (DATABASE skips the write while the lease was renewed less than half a retry period ago, so calling it often costs no database load); for NETWORK and KUBERNETES it is a no-op that returns `isLeader()`. |
 | `getLeaderSince()` | Returns the `Instant` when the last successful renewal or extension was recorded. |
 | `getRemainingLeadTime()` | Approximate time until the lease expires, computed from `getLeaderSince()` and `timeout`. |
 | `isExpiringSoon(Duration threshold)` | Returns `true` if the remaining lead time is less than `threshold`, useful for deciding when to call `tryExtend()`. |
@@ -258,7 +258,7 @@ ILeaderElector leaderElector = LeaderElectionFactory.getInstance().getLeaderElec
 
 ### FILE strategy with custom path
 
-The lock file is `<basePath>/<namespace>.<name>.lock`. Characters other than letters, digits, `.`, `-` and `_` are replaced by `_`, so the lock file is always created directly in the base path; in that case a short hash of the original name is appended (`<namespace>.<name>-<hash>.lock`), so different names never share a lock file. A lock held by another process is tried again once per retry period.
+The lock file is `<basePath>/<namespace>.<name>.lock`. Without a base path the temporary directory is used and an info message is logged: all competing processes must see the same directory, which is not the case for services with their own temporary directory (systemd `PrivateTmp`, containers, the per-user `TEMP` on Windows). Characters other than letters, digits, `.`, `-` and `_` are replaced by `_`, so the lock file is always created directly in the base path; in that case a short hash of the original name is appended (`<namespace>.<name>-<hash>.lock`), so different names never share a lock file. A lock held by another process is tried again once per retry period. The holder updates the modification time of the lock file, so cleaners of temporary directories keep it; a lock file that is deleted or replaced anyway is detected on the next renewal, and the node competes again for the new file.
 
 Via builder (recommended):
 
@@ -303,9 +303,11 @@ ILeaderElector leaderElector = LeaderElectionFactory.builder()
     .network().minimumMembers(2).build();
 ```
 
-In addition, every member sends a heartbeat to the coordinator it sees once per retry period, and the coordinator only confirms its lead while it receives them: from at least one other member, or from `minimumMembers - 1` members with a quorum. `isLeader()` returns `false` when the lead was not confirmed within the renew deadline, e.g. when a node comes back from a long JVM pause with an outdated view while the others chose a new coordinator.
+In addition, the coordinator sends a random challenge to the cluster once per retry period, and every member that sees it as the coordinator of its own view answers it. The coordinator only confirms its lead while it gets answers to challenges it sent within the renew deadline: from at least one other member, or from `minimumMembers - 1` members with a quorum. `isLeader()` returns `false` when the lead was not confirmed within the renew deadline, e.g. when a node comes back from a long JVM pause with an outdated view while the others chose a new coordinator; answers it buffered or received for older challenges do not count.
 
-**Security:** by default the cluster is neither authenticated nor encrypted, so any host on the network can join it and take the lead; an info message is logged in this case. Set a shared encryption key: all cluster messages are then encrypted, and a node without the key can neither read them nor join the cluster. All nodes need the same key.
+**Security:** by default the cluster is neither authenticated nor encrypted, so any host on the network can join it and take the lead; an info message is logged in this case. Set a shared encryption key: all cluster messages are then encrypted, including the messages of discovery and failure detection, so a node without the key can neither read nor forge them, nor join the cluster. Readable remain the cluster name, the sender and receiver addresses, the type of membership messages (join, leave, view, merge) and the TCP connections that detect crashed members; choose a cluster name that reveals nothing, and keep the cluster in a private network. JGroups logs every packet it rejects (e.g. from a node without the key); to keep foreign packets from flooding the log, set the loggers `org.jgroups.protocols.SYM_ENCRYPT`, `org.jgroups.protocols.Encrypt` and `org.jgroups.protocols.SERIALIZE` to `ERROR` or `OFF` in the logging configuration. Each message is encrypted with a random IV, and a recorded answer to an older challenge does not count. All nodes need the same key and the same library version.
+
+The encryption does not shield the nodes from the network itself: JGroups reads every packet that reaches the cluster's ports before it is decrypted, including Java deserialization of object messages, so a crafted packet from any host can at least crash a node. Run the NETWORK strategy only in a trusted network segment (restrict the multicast group and the member ports with a firewall), and set a JVM-wide deserialization filter for the application, e.g. `-Djdk.serialFilter=...` with an allow-list of the classes the application needs.
 
 ```bash
 # create the shared key once and distribute the file to all nodes
@@ -320,7 +322,7 @@ ILeaderElector leaderElector = LeaderElectionFactory.builder()
 Arrays.fill(password, ' '); // the password is no longer needed
 ```
 
-A `javax.crypto.SecretKey` can also be passed directly, e.g. from a secret store: `.network().encryptionKey(secretKey)`.
+A `javax.crypto.SecretKey` can also be passed directly, e.g. from a secret store: `.network().encryptionKey(secretKey)`. Only AES keys of 128, 192 or 256 bits are accepted, created randomly (`keytool` as above, or `KeyGenerator.getInstance("AES")`), never derived from a password: JGroups sends a hash of the key with every message, so a weak key could be found from it.
 
 For full control, `.network().configuration("my-jgroups.xml")` replaces the default JGroups protocol stack (a file, classpath resource or URL), e.g. to use TCP instead of UDP multicast, bind to a specific network interface or add other JGroups security protocols. An encryption key can be combined with a custom configuration, as long as the configuration has no encryption protocol of its own.
 
@@ -334,7 +336,7 @@ ILeaderElector leaderElector = LeaderElectionFactory.builder()
 leaderElector.elect();
 ```
 
-The lock is a Lease named after `name` in the Kubernetes namespace `namespace`. `isLeader()` returns `false` when the lease was not renewed within the renew deadline, even while the Kubernetes client still reports the lead. The service account of the pods needs these permissions:
+The lock is a Lease named after `name` in the Kubernetes namespace `namespace`. `isLeader()` returns `false` when the lease was not renewed within the renew deadline, even while the Kubernetes client still reports the lead. The service account of the pods needs these permissions. `get` and `update` are limited to the own Lease, so a compromised pod cannot take over the Leases of other components in the namespace; `create` cannot be limited by name in Kubernetes:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -345,7 +347,11 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    resourceNames: ["my-service"]
+    verbs: ["get", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
 ```
 
 **Upgrading from 1.2.x:** releases up to 1.2.x lock an Endpoints object instead. Nodes with different lock types do not see each other's lock, so during a rolling upgrade an old and a new node could both lead. Either stop all old pods before the new ones start (Deployment strategy `Recreate`), or upgrade in two steps:
@@ -471,7 +477,7 @@ config.setCloseTimeout(Duration.ofSeconds(2));
 
 ### Threads
 
-All electors of a JVM share a few daemon threads: one timer, one lease monitor, and a worker pool that runs election rounds and lease extensions. Workers are only created while rounds run and end after 60 s idle, so the thread count does not grow with the number of electors, and a slow elector does not delay the others. The rounds of electors started at the same time are spread over the retry period, so they do not borrow database connections all at once. A round that hangs, e.g. in a connection pool without a connection timeout, is reported as a warning; configure the pool's connection timeout below the renew deadline. While a worker runs a round it carries the elector's name, e.g. `leader-election-db-<namespace>.<name>`. The NETWORK strategy additionally runs one JGroups stack per elector and the KUBERNETES strategy the threads of the Kubernetes client, so keep the number of NETWORK and KUBERNETES electors per JVM small.
+All electors of a JVM share a few daemon threads: one timer, one lease monitor, and a worker pool that runs election rounds and lease extensions. Workers are only created while rounds run and end after 60 s idle, so the thread count does not grow with the number of electors, and a slow elector does not delay the others. The rounds of electors started at the same time are spread over the retry period, so they do not borrow database connections all at once. A round that hangs, e.g. in a connection pool without a connection timeout, is reported as a warning; configure the pool's connection timeout below the renew deadline. While a worker runs a round it carries the elector's name, e.g. `leader-election-db-<namespace>.<name>`. The NETWORK strategy additionally runs one JGroups stack per elector, and the KUBERNETES strategy an update thread and the threads of the client's leader election per elector, so keep the number of NETWORK and KUBERNETES electors per JVM small. KUBERNETES electors without an own API client share one default client.
 
 
 ## Administration API
@@ -528,6 +534,33 @@ cb test
 
 Runs all unit tests. No Docker required.
 
+A single test class or method runs with `--tests`:
+
+```bash
+cb test --tests "*FileLockSafetyTest"
+cb test --tests "*FileLockSafetyTest.testSymbolicLinkIsRefused"
+```
+
+The results are in `build/reports/tests/test/index.html`, the log in `build/toolarium-leader-election.log`.
+
+### Symbolic link test (FILE strategy)
+
+`FileLockSafetyTest.testSymbolicLinkIsRefused` checks that the FILE strategy refuses a lock file that was replaced by a symbolic link, so a link to another file (e.g. a configuration file) can never be opened or truncated through the lock. The test creates such a link and expects the lock to fail with the target untouched.
+
+Creating a symbolic link needs a privilege that Windows does not grant by default. Where the link cannot be created, the test is reported as skipped, not failed. To run it:
+
+- **Linux or macOS**: runs without any setup.
+- **Windows**: enable *Developer Mode* (Settings, System, For developers) and open a new terminal, or run the build as administrator.
+- **WSL**: runs without any setup. Use a copy of the project on the Linux file system, which also builds much faster than `/mnt/c`. WSL needs its own JDK and `cb`:
+
+```bash
+mkdir -p ~/projects
+# the working tree including uncommitted changes; use git clone for the pushed state
+rsync -a --exclude build --exclude .gradle /mnt/c/<path>/toolarium-leader-election/ ~/projects/toolarium-leader-election/
+cd ~/projects/toolarium-leader-election
+cb test --tests "*FileLockSafetyTest.testSymbolicLinkIsRefused"
+```
+
 ### Integration tests
 
 ```bash
@@ -547,6 +580,14 @@ Runs the full test suite including container-based integration tests. Requires D
 | `KubernetesEndpointsLeaderElectionTest` | k3s (lightweight Kubernetes), Endpoints lock |
 
 Each integration test starts its own container via [Testcontainers](https://testcontainers.com/), runs the full leader-election lifecycle against a real database or Kubernetes cluster, then tears the container down. Oracle has a longer cold-start time; allow several minutes for that container to become ready.
+
+A single integration test runs with `--tests` as well, e.g. against PostgreSQL only:
+
+```bash
+cb test -Pintegration --tests "*PostgreSQLLeaderElectionTest"
+```
+
+The containers need several GB of memory together; if the run is aborted or containers fail to start, run the integration tests one at a time. The test results are in the same report as the unit tests.
 
 
 ## Built With

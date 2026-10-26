@@ -30,7 +30,7 @@ public class SQLServerLeaderElectionDatabaseStructure extends JDBCLeaderElection
         return "CREATE TABLE " + getTableName() + "(id NVARCHAR(36) NOT NULL, name NVARCHAR(512) NOT NULL, "
                 + "instance NVARCHAR(255), username NVARCHAR(255), lease_ts BIGINT NOT NULL, "
                 + "force_release_deadline BIGINT NULL, "
-                + "CONSTRAINT pk_" + getTableName().toLowerCase() + " PRIMARY KEY (name))";
+                + "CONSTRAINT pk_" + getConstraintBaseName() + " PRIMARY KEY (name))";
     }
 
 

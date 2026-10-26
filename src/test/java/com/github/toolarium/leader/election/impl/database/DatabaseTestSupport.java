@@ -50,8 +50,11 @@ final class DatabaseTestSupport {
         DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(timeout, renewDeadline, retryPeriod);
         config.setCloseTimeout(Duration.ofSeconds(2));
         config.setDataSource(ds);
-        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.DATABASE, new LeaderElectionInformation(name), config);
-        return (DatabaseLeaderElectorImpl) elector;
+        DatabaseLeaderElectorImpl elector = (DatabaseLeaderElectorImpl) LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.DATABASE,
+                new LeaderElectionInformation(name), config);
+        // the fault tests need every extension to reach the database
+        elector.setExtensionInterval(Duration.ZERO);
+        return elector;
     }
 
 

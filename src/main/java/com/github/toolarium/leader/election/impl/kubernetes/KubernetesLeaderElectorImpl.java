@@ -12,6 +12,8 @@ import com.github.toolarium.leader.election.dto.kubernetes.KubernetesLeaderElect
 import com.github.toolarium.leader.election.dto.kubernetes.KubernetesLockType;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl;
+import com.github.toolarium.leader.election.impl.LeaderElectionExecutors;
+import com.github.toolarium.leader.election.impl.LogText;
 import io.kubernetes.client.extended.leaderelection.LeaderElectionConfig;
 import io.kubernetes.client.extended.leaderelection.LeaderElectionRecord;
 import io.kubernetes.client.extended.leaderelection.Lock;
@@ -40,6 +42,10 @@ import org.slf4j.LoggerFactory;
 public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<LeaderElectionConfiguration> {
     private static final Logger LOG = LoggerFactory.getLogger(KubernetesLeaderElectorImpl.class);
     private static final long NANOS_NOT_SET = Long.MIN_VALUE;
+    // The default API client is created once and shared by all electors without a client of their own: each client has its
+    // own connection pool and threads, and creating it can take seconds. Guarded by SHARED_CLIENT_LOCK.
+    private static final Object SHARED_CLIENT_LOCK = new Object();
+    private static ApiClient sharedDefaultClient;
     // volatile: written by elect() (initialization thread) and read by close() from another thread,
     // e.g. the JVM shutdown hook.
     private volatile io.kubernetes.client.extended.leaderelection.LeaderElector leaderElector;
@@ -100,7 +106,7 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
             if (preConfiguredClient != null) {
                 resolvedClient = preConfiguredClient;
             } else {
-                resolvedClient = Config.defaultClient();
+                resolvedClient = getSharedDefaultClient();
             }
         } catch (IOException e) {
             throw new LeaderElectionException("Could not initialize the kubernetes api client: " + e.getMessage(), e);
@@ -144,7 +150,7 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
                         // An Error does not end the thread either: the node would never compete again.
                         if (e instanceof Error && !errorReported) {
                             errorReported = true;
-                            LOG.warn("Kubernetes leader election of [{}] failed: {}. The node cannot lead while this lasts; check the memory and the classpath, the debug log has the stack trace.", 
+                            LOG.warn("Kubernetes leader election of [{}] failed: {}. The node cannot lead while this lasts; check the memory and the classpath; enable debug logging for the stack trace.", 
                                      getLeaderElectionInformation().getUniqueName(), e.toString());
                         } else if (!(e instanceof Error)) {
                             LOG.info("Kubernetes leader election of [{}] failed: {}, will retry after the retry period.", getLeaderElectionInformation().getUniqueName(), e.getMessage());
@@ -171,6 +177,37 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
         thread.setName(KubernetesLeaderElectorImpl.class.getName() + ": Update thread");
         updateThread = thread;
         thread.start();
+
+        // The client reports nothing while the API server is unreachable or the access is denied, so elect() without a timeout
+        // would wait for good: after the lease duration it returns "not leader"; the election goes on and can still take the lead.
+        final String uniqueName = getLeaderElectionInformation().getUniqueName();
+        LeaderElectionExecutors.getInstance().scheduleOnce(() -> {
+            // under the lock of setLeader(): a result reported meanwhile must not be overwritten
+            synchronized (KubernetesLeaderElectorImpl.this) {
+                if (active.get() && !closing.get() && !hasElectionResult()) {
+                    LOG.info("The Kubernetes leader election of [{}] got no result within the lease duration (API server not reachable or access "
+                             + "denied?), this node does not lead for now. The election goes on and this node can still take the lead.", uniqueName);
+                    setLeader(false, null);
+                }
+            }
+        }, getLeaderElectionConfiguration().getTimeout().toMillis());
+    }
+
+
+    /**
+     * Get the default API client shared by all electors without a client of their own; it is created on first use. If the
+     * creation fails, the next elector tries again.
+     *
+     * @return the shared default API client
+     * @throws IOException in case the client could not be created
+     */
+    private static ApiClient getSharedDefaultClient() throws IOException {
+        synchronized (SHARED_CLIENT_LOCK) {
+            if (sharedDefaultClient == null) {
+                sharedDefaultClient = Config.defaultClient();
+            }
+            return sharedDefaultClient;
+        }
     }
 
 
@@ -213,9 +250,10 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
             // block forever. Report "not leader" as soon as another identity holds the lock.
             if (active.get() && newLeader != null && !newLeader.equals(identity)) {
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug("NEW LEADER {}", newLeader);
+                    LOG.debug("NEW LEADER {}", LogText.getInstance().of(newLeader));
                 }
-                setLeader(false, newLeader);
+                // the holder is written by whoever may update the Lease: safe for the log
+                setLeader(false, LogText.getInstance().of(newLeader));
             }
         });
     }
@@ -234,6 +272,31 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
         }
         long last = lastRenewalNanos;
         return last != NANOS_NOT_SET && System.nanoTime() - last <= getLeaderElectionConfiguration().getRenewDeadline().toNanos();
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl#getLeadConfirmedNanos()
+     */
+    @Override
+    protected long getLeadConfirmedNanos() {
+        long nanos = lastRenewalNanos;
+        if (nanos == NANOS_NOT_SET) {
+            return super.getLeadConfirmedNanos();
+        }
+        return nanos;
+    }
+
+
+    /**
+     * Confirm the lead after a renewal, while this node leads: a renewal after the lead lapsed (no renewal within the renew
+     * deadline) then starts a new term, so leases of the lapsed term stay invalid. The first acquisition is reported by the
+     * start hook of the client.
+     */
+    private synchronized void confirmRenewal() {
+        if (super.isLeader()) {
+            setLeader(true, null);
+        }
     }
 
 
@@ -516,8 +579,10 @@ public class KubernetesLeaderElectorImpl extends AbstractLeaderElectorImpl<Leade
          * @param startNanos the nanoTime before the write
          */
         private void recordRenewal(boolean success, LeaderElectionRecord record, long startNanos) {
-            if (success && record != null && delegate.identity().equals(record.getHolderIdentity())) {
+            // only the lock of the current session counts: a renewal of a closed session must not extend the lead of a later one
+            if (success && record != null && KubernetesLeaderElectorImpl.this.lock == this && delegate.identity().equals(record.getHolderIdentity())) {
                 lastRenewalNanos = startNanos;
+                confirmRenewal();
             }
         }
     }

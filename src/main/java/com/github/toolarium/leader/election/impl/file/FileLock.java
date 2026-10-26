@@ -5,19 +5,30 @@
  */
 package com.github.toolarium.leader.election.impl.file;
 
+import com.github.toolarium.leader.election.impl.LeaderElectionExecutors;
 import com.github.toolarium.leader.election.impl.file.exception.FileLockException;
 import java.io.File;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.nio.channels.FileChannel;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,29 +40,44 @@ import org.slf4j.LoggerFactory;
  */
 public class FileLock implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(FileLock.class);
+    // close() waits this long for a lock operation that is still running before it releases the lock in the background
+    private static final long CLOSE_WAIT_MILLIS = 5000L;
     private UUID id;
     private File file;
     private Long threadId;
+    // the thread that created the lock; a weak reference does not keep an ended thread in memory
+    private final WeakReference<Thread> ownerThread;
     private String user;
-    private Duration lockPeriod;
-    private Duration renewDeadline;
+    // volatile: close() clears them while the lock handler reads them
+    private volatile Duration lockPeriod;
+    private volatile Duration renewDeadline;
     // volatile: setFileLockListener() is called from the initialization thread while the
-    // FileLockFactory scheduler thread may concurrently read this field inside synchronized
-    // lock()/unlock()/renew().  Without volatile the scheduler thread may never see the write.
+    // FileLockFactory handler may concurrently read this field in lock()/unlock()/renew().
+    // Without volatile the handler may never see the write.
     private volatile IFileLockListener fileLockListener;
 
     private volatile Boolean isValid;
     // volatile so that getLockTime() / hasLock() reads from other threads always see the
-    // latest value written by the synchronized lock()/unlock()/renew() methods.
+    // latest value written by lock()/unlock()/renew() under the state lock.
     private volatile FileChannel channel;
     private volatile java.nio.channels.FileLock fileLock;
     private volatile Instant lockTime;
+    // nanoTime of the last lock or renewal: the renewals are scheduled on the monotonic clock, not on the wall clock
+    private volatile long lockNanos;
     // set by close(): a closed lock is never acquired again, e.g. by a renewal of the lock handler racing close()
     private volatile boolean closed;
     // a lock that is not held is tried again after this period; null: on every check of the lock handler
     private final Duration retryPeriod;
     private volatile long lastAttemptNanos;
     private volatile boolean attempted;
+    // the file key (e.g. device and inode) of the locked file, or null if the file system provides none
+    private volatile Object lockedFileKey;
+    // Guards the state of the lock. The checks of the lock file on renewal run without it: a stalled (network) file system
+    // must not block close() or the listener.
+    private final ReentrantLock stateLock = new ReentrantLock();
+    // the check of the lock file that runs on the shared executors, so that a stalled one is not started again
+    private volatile Future<Boolean> pendingCheck;
+    private final Object checkLock = new Object();
 
     
     /**
@@ -92,6 +118,7 @@ public class FileLock implements AutoCloseable {
         this.id = UUID.randomUUID();
         this.file = file;
         this.threadId = ThreadUtil.getInstance().getThreadId();
+        this.ownerThread = new WeakReference<>(Thread.currentThread());
         this.user = System.getProperty("user.name");
         this.lockPeriod = lockPeriod;
         this.renewDeadline = renewDeadline;
@@ -108,15 +135,24 @@ public class FileLock implements AutoCloseable {
      *
      * @param fileLockListener the file lock listener
      */
-    public synchronized void setFileLockListener(IFileLockListener fileLockListener) {
-        this.fileLockListener = fileLockListener;
-
-        if (fileLockListener != null && isValid != null) {
-            if (isValid) {
-                fileLockListener.hasLock();
-            } else {
-                fileLockListener.releaseLock();
+    public void setFileLockListener(IFileLockListener fileLockListener) {
+        if (fileLockListener == null) {
+            // detaching needs no lock, so it never waits for a lock operation that hangs
+            this.fileLockListener = null;
+            return;
+        }
+        stateLock.lock();
+        try {
+            this.fileLockListener = fileLockListener;
+            if (isValid != null) {
+                if (isValid) {
+                    fileLockListener.hasLock();
+                } else {
+                    fileLockListener.releaseLock();
+                }
             }
+        } finally {
+            stateLock.unlock();
         }
     }
     
@@ -126,29 +162,199 @@ public class FileLock implements AutoCloseable {
      *
      * @throws FileLockException In case the lock can not be acquired.
      */
-    public synchronized void renew() throws FileLockException {
-        if (closed) {
-            throw new FileLockException("Could not renew the lock [" + getId() + "] [" + getFile() + "]: closed.");
-        }
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("Renew file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
+    public void renew() throws FileLockException {
+        java.nio.channels.FileLock currentLock;
+        stateLock.lock();
+        try {
+            if (closed) {
+                throw new FileLockException("Could not renew the lock [" + getId() + "] [" + getFile() + "]: closed.");
+            }
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Renew file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
+            }
+
+            // An OS file lock stays valid until it is released or the process dies, so a lock that is
+            // still held is renewed in place. Releasing and re-acquiring it would open a window in which
+            // another process can take the lock, and would fire releaseLock()+hasLock() callbacks that
+            // make the elector believe leadership was lost and regained.
+            currentLock = fileLock;
+            if (currentLock == null || !currentLock.isValid() || !hasLock()) {
+                unlock();
+                lock();
+                return;
+            }
+        } finally {
+            stateLock.unlock();
         }
 
-        // An OS file lock stays valid until it is released or the process dies, so a lock that is
-        // still held is renewed in place. Releasing and re-acquiring it would open a window in which
-        // another process can take the lock, and would fire releaseLock()+hasLock() callbacks that
-        // make the elector believe leadership was lost and regained.
-        java.nio.channels.FileLock currentLock = fileLock;
-        if (currentLock != null && currentLock.isValid() && hasLock()) {
-            this.lockTime = Instant.now();
-            if (fileLockListener != null) {
-                fileLockListener.hasLock();
-            }
+        // the lock file is checked without the state lock: a stalled (network) file system must not block close()
+        Boolean intact = checkLockedFile(currentLock);
+        if (intact == null) {
+            // not checked in time: not renewed, so the lead ends after the renew deadline if this keeps failing
             return;
         }
 
-        unlock();
-        lock();
+        stateLock.lock();
+        try {
+            if (closed || fileLock != currentLock) {
+                // closed or locked again meanwhile
+                return;
+            }
+            if (intact) {
+                this.lockTime = Instant.now();
+                this.lockNanos = System.nanoTime();
+                // read once: the owner may detach the listener concurrently
+                IFileLockListener listener = fileLockListener;
+                if (listener != null) {
+                    listener.hasLock();
+                }
+                return;
+            }
+
+            // The lock file was deleted or replaced, or the locked file cannot be used anymore (e.g. a network file system lost the
+            // lock): another process may hold the lock now. Give it up and compete for the file now at the path.
+            LOG.info("Lock file [{}] was deleted or replaced, or the lock was lost; the lock is acquired again.", getFile());
+            unlock();
+            lock();
+        } finally {
+            stateLock.unlock();
+        }
+    }
+
+
+    /**
+     * Check that the lock file is still the locked file and can be used, and update its modification time. With a renew
+     * deadline the check runs on the shared executors and is awaited for half of it, so a stalled file system blocks
+     * neither the caller nor the renewals of other locks for good.
+     *
+     * @param currentLock the lock to check
+     * @return true if the lock file is intact, false if not, or null if the check did not finish in time
+     */
+    private Boolean checkLockedFile(java.nio.channels.FileLock currentLock) {
+        Callable<Boolean> check = () -> {
+            boolean intact = isLockedFileAtPath() && isChannelUsable(currentLock);
+            if (intact) {
+                touchLockFile();
+            }
+            return intact;
+        };
+        Duration deadline = renewDeadline;
+        if (deadline == null) {
+            return runCheck(check);
+        }
+
+        Future<Boolean> future;
+        // the check and the submit are atomic: the lock handler and an extension must not both start a check
+        synchronized (checkLock) {
+            Future<Boolean> pending = pendingCheck;
+            if (pending != null && !pending.isDone()) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("The previous check of lock file [{}] is still running.", getFile());
+                }
+                return null;
+            }
+            try {
+                future = LeaderElectionExecutors.getInstance().submit("leader-election-file-check", check);
+            } catch (RejectedExecutionException e) {
+                return runCheck(check);
+            }
+            pendingCheck = future;
+        }
+        try {
+            return future.get(Math.max(1L, deadline.toMillis() / 2), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("The check of lock file [{}] did not finish in time.", getFile());
+            }
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (ExecutionException e) {
+            return Boolean.FALSE;
+        }
+    }
+
+
+    /**
+     * Run a check of the lock file on the calling thread.
+     *
+     * @param check the check
+     * @return the result, false if the check failed
+     */
+    private static Boolean runCheck(Callable<Boolean> check) {
+        try {
+            return check.call();
+        } catch (Exception e) {
+            return Boolean.FALSE;
+        }
+    }
+
+
+    /**
+     * Test if the file at the lock path is still the locked file. Uses the file key (inode) where the file system provides one,
+     * otherwise only checks that the file still exists.
+     *
+     * @return true if the locked file is still at the path
+     */
+    private boolean isLockedFileAtPath() {
+        try {
+            Object currentKey = Files.readAttributes(file.toPath(), BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).fileKey();
+            return lockedFileKey == null || lockedFileKey.equals(currentKey);
+        } catch (IOException | SecurityException e) {
+            // the file does not exist anymore or cannot be read
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Could not read the attributes of lock file [{}]: {}", getFile(), e.toString());
+            }
+            return false;
+        }
+    }
+
+
+    /**
+     * Test if the channel of the lock can still be used. A network file system that lost the lock (e.g. after a partition
+     * longer than the server's lease) fails the operations on the file descriptor, while the local lock object stays valid.
+     *
+     * @param lock the lock
+     * @return true if the channel can be used
+     */
+    private boolean isChannelUsable(java.nio.channels.FileLock lock) {
+        try {
+            lock.channel().size();
+            return true;
+        } catch (IOException e) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("The locked file [{}] cannot be used anymore: {}", getFile(), e.toString());
+            }
+            return false;
+        }
+    }
+
+
+    /**
+     * Get the time since the lock was acquired or renewed last, measured with the monotonic clock.
+     *
+     * @return the age in nanoseconds, or {@link Long#MAX_VALUE} if the lock is not held
+     */
+    public long getLockAgeNanos() {
+        if (lockTime == null) {
+            return Long.MAX_VALUE;
+        }
+        return System.nanoTime() - lockNanos;
+    }
+
+
+    /**
+     * Update the modification time of the lock file, so that cleaners of temporary directories do not delete a lock file in use.
+     */
+    private void touchLockFile() {
+        try {
+            Files.setLastModifiedTime(file.toPath(), FileTime.from(Instant.now()));
+        } catch (IOException | SecurityException e) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Could not update the modification time of lock file [{}]: {}", getFile(), e.toString());
+            }
+        }
     }
 
 
@@ -160,12 +366,39 @@ public class FileLock implements AutoCloseable {
      * @see java.lang.AutoCloseable#close()
      */
     @Override
-    public synchronized void close() throws Exception {
+    public void close() throws Exception {
         closed = true;
         // the owner closed the lock: no further callbacks
         fileLockListener = null;
-        unlock();
 
+        // The release (a file lock RPC on a network file system) runs on its own thread and is awaited for a bounded time:
+        // a stalled file system must neither block close() nor the JVM shutdown.
+        Thread releaseThread = new Thread(() -> {
+            stateLock.lock();
+            try {
+                release();
+            } finally {
+                stateLock.unlock();
+            }
+        }, "leader-election-file-release");
+        releaseThread.setDaemon(true);
+        releaseThread.start();
+        try {
+            releaseThread.join(CLOSE_WAIT_MILLIS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (releaseThread.isAlive()) {
+            LOG.info("Lock file [{}] could not be released yet (e.g. a stalled network file system); it is released as soon as possible.", getFile());
+        }
+    }
+
+
+    /**
+     * Release the lock and clear the state of a closed lock. The caller holds the state lock.
+     */
+    private void release() {
+        unlock();
         this.threadId = null;
         this.lockTime = null;
         this.user = null;
@@ -204,6 +437,27 @@ public class FileLock implements AutoCloseable {
     }
     
     
+    /**
+     * Test if the lock was closed by its owner.
+     *
+     * @return true if the lock is closed
+     */
+    public boolean isClosed() {
+        return closed;
+    }
+
+
+    /**
+     * Test if the thread that created the lock is still alive. A closed lock has no owner anymore.
+     *
+     * @return true if the owner thread is alive
+     */
+    public boolean isOwnerThreadAlive() {
+        Thread owner = ownerThread.get();
+        return !closed && owner != null && owner.isAlive();
+    }
+
+
     /**
      * True if the FileLock has the lock
      *
@@ -310,9 +564,29 @@ public class FileLock implements AutoCloseable {
      *
      * @throws FileLockException In case the lock can not be acquired.
      */
-    public synchronized void lock() throws FileLockException {
+    public void lock() throws FileLockException {
+        stateLock.lock();
+        try {
+            lockLocked();
+        } finally {
+            stateLock.unlock();
+        }
+    }
+
+
+    /**
+     * Acquire the lock; the caller holds the state lock.
+     *
+     * @throws FileLockException In case the lock can not be acquired.
+     */
+    private void lockLocked() throws FileLockException {
         if (closed) {
             throw new FileLockException("Could not aquire the lock [" + getId() + "] [" + getFile() + "]: closed.");
+        }
+        java.nio.channels.FileLock currentLock = fileLock;
+        if (currentLock != null && currentLock.isValid() && hasLock()) {
+            // already held: a second channel on the same file would fail and reset the state of the held lock
+            return;
         }
         lastAttemptNanos = System.nanoTime();
         attempted = true;
@@ -341,6 +615,7 @@ public class FileLock implements AutoCloseable {
         try {
             this.fileLock = ch.tryLock();
             this.lockTime = Instant.now();
+            this.lockNanos = System.nanoTime();
         } catch (OverlappingFileLockException | IOException ex) {
             try {
                 ch.close();
@@ -369,13 +644,21 @@ public class FileLock implements AutoCloseable {
             throw new FileLockException("Could not aquire the lock of the file " + file + ", held by another process.", false);
         }
 
+        // the identity of the locked file, to detect a lock file that is deleted or replaced later
+        try {
+            this.lockedFileKey = Files.readAttributes(file.toPath(), BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).fileKey();
+        } catch (IOException | SecurityException e) {
+            this.lockedFileKey = null;
+        }
         this.isValid = true;
         if (LOG.isDebugEnabled()) {
             LOG.debug("Created file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
         }
 
-        if (fileLockListener != null) {
-            fileLockListener.hasLock();
+        // read once: the owner may detach the listener concurrently
+        IFileLockListener listener = fileLockListener;
+        if (listener != null) {
+            listener.hasLock();
         }
     }
     
@@ -383,7 +666,20 @@ public class FileLock implements AutoCloseable {
     /**
      * Unlock
      */
-    public synchronized void unlock() {
+    public void unlock() {
+        stateLock.lock();
+        try {
+            unlockLocked();
+        } finally {
+            stateLock.unlock();
+        }
+    }
+
+
+    /**
+     * Release the lock; the caller holds the state lock.
+     */
+    private void unlockLocked() {
         if (hasLock()) {
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Release file lock [" + getId() + "] [" + getFile() + "] on " + getLockTime() + ".");
@@ -411,8 +707,10 @@ public class FileLock implements AutoCloseable {
         this.lockTime = null;
         this.isValid = false;
         
-        if (fileLockListener != null) {
-            fileLockListener.releaseLock();
+        // read once: the owner may detach the listener concurrently
+        IFileLockListener listener = fileLockListener;
+        if (listener != null) {
+            listener.releaseLock();
         }
     }
 }

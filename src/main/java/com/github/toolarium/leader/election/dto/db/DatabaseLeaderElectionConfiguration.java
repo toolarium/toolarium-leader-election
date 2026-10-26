@@ -27,8 +27,9 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
      */
     public static final int SCHEMA_VERSION = 1;
 
-    private DataSource dataSource;
-    private LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
+    // volatile: set when the elector is built, read by the election and the administration threads
+    private volatile DataSource dataSource;
+    private volatile LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
     // When false, elect() fails fast with a clear error instead of executing CREATE TABLE or
     // ALTER TABLE at startup. Set to false for environments where the application user has no
     // DDL rights or when the table is managed by an external migration tool (Flyway, Liquibase).
@@ -321,14 +322,16 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
 
         /**
          * Create the update statement for renewing the leader timestamp.
-         * Updates id and lease_ts only when name and instance both match AND no admin
-         * force-release deadline is pending. This prevents a force-released holder from
-         * inadvertently extending its own lease before it discovers the deadline.
+         * Updates id and lease_ts only when name and instance both match, the row still holds the record id the renewer
+         * wrote or read last, AND no admin force-release deadline is pending. The record id keeps a late renewal of a closed
+         * session from overwriting the row of a later session of the same instance; the deadline prevents a force-released
+         * holder from inadvertently extending its own lease before it discovers it.
+         * Parameters: newId, lease_ts, name, instance, expectedId
          *
          * @return the update statement
          */
         public String createSQLUpdateLeaderTimestamp() {
-            return "UPDATE " + getTableName() + " SET id = ?, lease_ts = ? WHERE name = ? AND instance = ? AND force_release_deadline IS NULL;";
+            return "UPDATE " + getTableName() + " SET id = ?, lease_ts = ? WHERE name = ? AND instance = ? AND id = ? AND force_release_deadline IS NULL;";
         }
 
 
@@ -336,16 +339,18 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
          * Create the update statement for atomically stealing an expired or force-released lease.
          * Only succeeds when the row identified by name and id still exists and either the
          * lease has expired (lease_ts older than expiryThreshold) OR an admin force-release
-         * deadline has elapsed (force_release_deadline is set and in the past).
+         * deadline has elapsed (force_release_deadline is set and in the past). A lease or deadline
+         * after futureLimit cannot come from a healthy node and counts as expired, too.
          * The stolen row has force_release_deadline reset to NULL.
-         * Parameters: newId, newInstance, newUsername, newLease_ts, name, currentLeaderId, expiryThreshold, dbNow
+         * Parameters: newId, newInstance, newUsername, newLease_ts, name, currentLeaderId, expiryThreshold, futureLimit, dbNow, futureLimit
          *
          * @return the steal-leadership update statement
          */
         public String createSQLStealLeadership() {
             return "UPDATE " + getTableName()
                     + " SET id = ?, instance = ?, username = ?, lease_ts = ?, force_release_deadline = NULL"
-                    + " WHERE name = ? AND id = ? AND (lease_ts < ? OR (force_release_deadline IS NOT NULL AND force_release_deadline <= ?));";
+                    + " WHERE name = ? AND id = ? AND (lease_ts < ? OR lease_ts > ?"
+                + " OR (force_release_deadline IS NOT NULL AND (force_release_deadline <= ? OR force_release_deadline > ?)));";
         }
 
 

@@ -16,11 +16,18 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import org.jgroups.Address;
 import org.jgroups.BytesMessage;
@@ -34,6 +41,7 @@ import org.jgroups.conf.ConfiguratorFactory;
 import org.jgroups.conf.ProtocolStackConfigurator;
 import org.jgroups.protocols.Encrypt;
 import org.jgroups.protocols.FD_SOCK2;
+import org.jgroups.protocols.SERIALIZE;
 import org.jgroups.protocols.SYM_ENCRYPT;
 import org.jgroups.protocols.TP;
 import org.jgroups.protocols.UDP;
@@ -53,18 +61,27 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>Quorum: with {@link NetworkLeaderElectionConfiguration#getMinimumMembers()} set to a
  *       majority of the cluster, the coordinator of a minority partition does not take the lead.</li>
- *   <li>Confirmation by the members: every member sends a heartbeat to the coordinator it sees in its view
- *       once per retry period. The coordinator only confirms its lead when, within the renew deadline, it
- *       received heartbeats from at least one other member, or from {@code minimumMembers - 1} members when a
- *       quorum is set; a node alone in its view confirms itself. A coordinator whose view is stale, e.g. after
- *       a long JVM pause while the others elected a new coordinator, gets no heartbeats.</li>
+ *   <li>Confirmation by the members: once per retry period the coordinator sends a random challenge to the
+ *       cluster, and every member that sees it as the coordinator of its own view answers it. The coordinator
+ *       only confirms its lead when at least one other member, or {@code minimumMembers - 1} members when a
+ *       quorum is set, answered a challenge it sent within the renew deadline; a node alone in its view
+ *       confirms itself. A coordinator whose view is stale, e.g. after a long JVM pause while the others
+ *       elected a new coordinator, gets no answers, and answers to older challenges (buffered or replayed) do
+ *       not count.</li>
  *   <li>Time-based fencing: {@link #isLeader()} returns {@code false} when the lead was not
  *       confirmed within the renew deadline.</li>
  * </ul>
  * Without a quorum each side of a network partition elects its own leader until the partitions merge.
  *
- * <p>With an encryption key all cluster messages are encrypted ({@code SYM_ENCRYPT}), so a node without the key can
- * neither read them nor join the cluster. Without a key and without a custom JGroups configuration an info message is logged.
+ * <p>With an encryption key all cluster messages are encrypted directly above the transport, including the headers of the
+ * protocols and the messages of discovery and failure detection ({@code SERIALIZE} above {@code SYM_ENCRYPT}, CBC mode with a
+ * random IV per message), so a node without the key can neither read, forge nor join. Readable remain the cluster name, the
+ * outer sender and receiver addresses, the type of membership messages (join, leave, view, merge; {@code SERIALIZE} keeps the
+ * {@code GMS} header outside), and the TCP connections of {@code FD_SOCK2}, which detect crashed members outside the protocol
+ * stack. The encryption protocols log every packet they reject; their log level is set in the logging configuration of the
+ * application (the levels of JGroups protocols cannot be changed through SLF4J). JGroups still reads every incoming packet before it
+ * is decrypted (including Java deserialization of object messages), so the cluster must run in a trusted network segment.
+ * Without a key and without a custom JGroups configuration an info message is logged.
  *
  * @author patrick
  */
@@ -88,8 +105,14 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
     private static final int PORT_SELECTION_ATTEMPTS = 50;
     private static final int MAX_PORT = 65535;
     private static final int MIN_DYNAMIC_PORT = 49152;
-    // payload of the heartbeat a member sends to the coordinator of its view
+    // the challenge the coordinator sends to the cluster, and the heartbeat a member answers it with; each is the marker
+    // followed by the random number of the challenge
+    private static final byte[] CHALLENGE = new byte[] {'C', 'H'};
     private static final byte[] HEARTBEAT = new byte[] {'H', 'B'};
+    private static final int MESSAGE_LENGTH = HEARTBEAT.length + Long.BYTES;
+    private static final SecureRandom CHALLENGE_RANDOM = new SecureRandom();
+    // see getConfirmationNanos()
+    private static final long NOT_CONFIRMED = Long.MIN_VALUE;
     // The periodic view checks on the threads shared by all electors (LeaderElectionExecutors).
     // volatile: written by initializeImplementation() (under lifecycleLock writeLock) and read by
     // close() without holding any lock; volatile is required for the JMM happens-before guarantee.
@@ -106,12 +129,17 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
     // nanoTime when the quorum was found missing, and whether the missing quorum was already warned about (once per outage)
     private volatile long quorumMissingSinceNanos;
     private volatile boolean quorumWarned;
-    // nanoTime of the last heartbeat per member that sees this node as coordinator
+    // the challenges this node sent as coordinator within the renew deadline: random number -> nanoTime it was sent
+    private final Map<Long, Long> challenges = new ConcurrentHashMap<>();
+    // per member that sees this node as coordinator: nanoTime of the newest challenge it answered
     private final Map<Address, Long> heartbeats = new ConcurrentHashMap<>();
     // views are applied by the JGroups thread and by the periodic check: a view older than the last applied one is ignored
     private final Object viewLock = new Object();
     private ViewId lastViewId;
     private final AtomicBoolean closing = new AtomicBoolean(false);
+    // the local address and its text, so that the text is not built again on every check
+    private volatile Address namedAddress;
+    private volatile String addressName;
 
 
     /**
@@ -139,6 +167,7 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
         quorumMissing = false;
         quorumWarned = false;
         heartbeats.clear();
+        challenges.clear();
         synchronized (viewLock) {
             lastViewId = null;
         }
@@ -162,10 +191,9 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
         View initialView = channel.getView();
         if (initialView != null && !initialView.getMembers().isEmpty()) {
             if (isLeaderOfView(initialView, channel.getAddress())) {
-                applyView(initialView, channel.getAddress());
-            } else {
-                // let the coordinator confirm its lead without waiting for the first periodic check
-                sendHeartbeat(channel, initialView, channel.getAddress());
+                applyView(channel, initialView);
+                // let the members confirm the lead without waiting for the first periodic check
+                sendChallenge(channel, initialView, channel.getAddress());
             }
         }
 
@@ -186,6 +214,19 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
             return false;
         }
         return System.nanoTime() - lastConfirmedNanos <= getLeaderElectionConfiguration().getRenewDeadline().toNanos();
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl#getLeadConfirmedNanos()
+     */
+    @Override
+    protected long getLeadConfirmedNanos() {
+        long nanos = lastConfirmedNanos;
+        if (nanos == 0L) {
+            return super.getLeadConfirmedNanos();
+        }
+        return nanos;
     }
 
 
@@ -227,6 +268,26 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
 
 
     /**
+     * Apply a cluster view of a channel, unless the channel is not the current one anymore: a callback or a check of a
+     * closed channel that is late must not apply its view to a later session.
+     *
+     * @param ch the channel the view belongs to
+     * @param view the cluster view, not empty
+     * @return true if the view was applied
+     */
+    protected boolean applyView(JChannel ch, View view) {
+        synchronized (viewLock) {
+            // checked under the view lock: the initialization resets the view state under it before the new channel is used
+            if (ch == null || ch != channel) {
+                return false;
+            }
+            applyView(view, ch.getAddress());
+            return true;
+        }
+    }
+
+
+    /**
      * Apply a cluster view: update the leader state and, when this node leads, the confirmation time.
      *
      * @param view the cluster view, not empty
@@ -240,72 +301,170 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
                 return;
             }
             lastViewId = viewId;
-            heartbeats.keySet().retainAll(view.getMembers());
+            // a set of the members: retainAll() on the member list would compare every key with every member
+            Set<Address> members = new HashSet<>(view.getMembers());
+            heartbeats.keySet().retainAll(members);
 
             if (isLeaderOfView(view, self)) {
-                if (isConfirmedByMembers(view, self)) {
-                    // set before setLeader so isLeader() never sees the new lead with a stale confirmation time
-                    lastConfirmedNanos = System.nanoTime();
-                    setLeader(true, "" + self);
+                long confirmedNanos = getConfirmationNanos(view, self);
+                if (confirmedNanos != NOT_CONFIRMED) {
+                    // The lead counts from the send time of the challenge the members answered, not from now: otherwise it could
+                    // last up to twice the renew deadline after the members last confirmed it. Set before setLeader so isLeader()
+                    // never sees the new lead with a stale confirmation time.
+                    if (confirmedNanos - lastConfirmedNanos > 0 || !super.isLeader()) {
+                        lastConfirmedNanos = confirmedNanos;
+                    }
+                    setLeader(true, getAddressName(self));
+                } else if (super.isLeader() && System.nanoTime() - lastConfirmedNanos > getLeaderElectionConfiguration().getRenewDeadline().toNanos()) {
+                    // Not confirmed: isLeader() is already false since the renew deadline passed. The loss is reported as well, so
+                    // that leases of this term stay invalid and a later confirmation counts as a new term.
+                    setLeader(false, getAddressName(self));
                 }
-                // otherwise the lead is not confirmed: isLeader() turns false once the last confirmation is older than the renew deadline
             } else {
-                setLeader(false, "" + self);
+                setLeader(false, getAddressName(self));
             }
         }
     }
 
 
     /**
-     * Check if the members of the view confirm this node as their coordinator: within the renew deadline at least one other
-     * member, or {@code minimumMembers - 1} members when a quorum is set, sent a heartbeat. A node alone in its view needs no
-     * confirmation.
+     * Get the text of the local address; it only changes with a new channel.
+     *
+     * @param self the local address
+     * @return the text of the address
+     */
+    private String getAddressName(Address self) {
+        String name = addressName;
+        if (name == null || namedAddress != self) {
+            name = String.valueOf(self);
+            // a concurrent caller may build the text once more, which is harmless
+            addressName = name;
+            namedAddress = self;
+        }
+        return name;
+    }
+
+
+    /**
+     * Check if the members of the view confirm this node as their coordinator: at least one other member, or
+     * {@code minimumMembers - 1} members when a quorum is set, answered a challenge sent within the renew deadline. A node
+     * alone in its view needs no confirmation.
      *
      * @param view the cluster view, not empty
      * @param self the local address
      * @return true if the lead is confirmed
      */
     protected boolean isConfirmedByMembers(View view, Address self) {
-        int others = view.size() - 1;
-        if (others <= 0) {
-            return true;
-        }
-
-        int required = Math.min(others, Math.max(1, getLeaderElectionConfiguration().getMinimumMembers() - 1));
-        long now = System.nanoTime();
-        long windowNanos = getLeaderElectionConfiguration().getRenewDeadline().toNanos();
-        int confirmed = 0;
-        for (Address member : view.getMembers()) {
-            Long heartbeatNanos = heartbeats.get(member);
-            if (!member.equals(self) && heartbeatNanos != null && now - heartbeatNanos <= windowNanos) {
-                confirmed++;
-            }
-        }
-        return confirmed >= required;
+        return getConfirmationNanos(view, self) != NOT_CONFIRMED;
     }
 
 
     /**
-     * Send a heartbeat to the coordinator of the view, unless this node is the coordinator.
+     * Get the time from which the members of the view confirm this node as their coordinator: the send time of the challenge
+     * that the required number of members answered (the {@code required}-th newest answer within the renew deadline). A node
+     * alone in its view confirms itself now.
+     *
+     * @param view the cluster view, not empty
+     * @param self the local address
+     * @return the nanoTime of the confirmation, or {@link #NOT_CONFIRMED}
+     */
+    private long getConfirmationNanos(View view, Address self) {
+        long now = System.nanoTime();
+        int others = view.size() - 1;
+        if (others <= 0) {
+            return now;
+        }
+
+        int required = Math.min(others, Math.max(1, getLeaderElectionConfiguration().getMinimumMembers() - 1));
+        long windowNanos = getLeaderElectionConfiguration().getRenewDeadline().toNanos();
+        List<Long> answers = new ArrayList<>(others);
+        for (Address member : view.getMembers()) {
+            Long heartbeatNanos = heartbeats.get(member);
+            if (!member.equals(self) && heartbeatNanos != null && now - heartbeatNanos <= windowNanos) {
+                answers.add(heartbeatNanos);
+            }
+        }
+        if (answers.size() < required) {
+            return NOT_CONFIRMED;
+        }
+        // newest first: the required-th newest answer is the time from which enough members confirm the lead
+        answers.sort((a, b) -> Long.compare(b - a, 0L));
+        return answers.get(required - 1);
+    }
+
+
+    /**
+     * Send a challenge to the cluster when this node is the coordinator of the view and has other members: their answers
+     * confirm the lead.
      *
      * @param ch the channel
      * @param view the cluster view
      * @param self the local address
      */
-    protected void sendHeartbeat(JChannel ch, View view, Address self) {
-        if (view == null || view.getMembers().isEmpty()) {
+    protected void sendChallenge(JChannel ch, View view, Address self) {
+        if (view == null || view.size() < 2 || !view.getMembers().get(0).equals(self)) {
             return;
         }
-        Address coordinator = view.getMembers().get(0);
-        if (coordinator.equals(self)) {
-            return;
-        }
+        send(ch, null, CHALLENGE, issueChallenge());
+    }
+
+
+    /**
+     * Create a new challenge and remember when it was sent; challenges older than the renew deadline are dropped.
+     *
+     * @return the random number of the challenge
+     */
+    long issueChallenge() {
+        long now = System.nanoTime();
+        long windowNanos = getLeaderElectionConfiguration().getRenewDeadline().toNanos();
+        challenges.values().removeIf(sent -> now - sent > windowNanos);
+        long challenge = CHALLENGE_RANDOM.nextLong();
+        challenges.put(challenge, now);
+        return challenge;
+    }
+
+
+    /**
+     * Send a challenge or a heartbeat.
+     *
+     * @param ch the channel
+     * @param destination the receiver, or null for the whole cluster
+     * @param marker the marker of the message
+     * @param challenge the random number of the challenge
+     */
+    private void send(JChannel ch, Address destination, byte[] marker, long challenge) {
         try {
-            ch.send(new BytesMessage(coordinator, HEARTBEAT));
+            ch.send(new BytesMessage(destination, ByteBuffer.allocate(MESSAGE_LENGTH).put(marker).putLong(challenge).array()));
         } catch (Exception e) {
             if (LOG.isDebugEnabled()) {
-                LOG.debug("Could not send the heartbeat of cluster [{}] to [{}]: {}", getLeaderElectionInformation().getElectionGroupName(), coordinator, e.getMessage());
+                LOG.debug("Could not send a message of cluster [{}] to [{}]: {}", getLeaderElectionInformation().getElectionGroupName(), destination, e.getMessage());
             }
+        }
+    }
+
+
+    /**
+     * Handle a challenge or a heartbeat of another member.
+     *
+     * @param ch the channel the message was received on
+     * @param msg the message
+     */
+    void handleMessage(JChannel ch, Message msg) {
+        Address source = msg.getSrc();
+        if (source == null || source.equals(ch.getAddress()) || !(msg instanceof BytesMessage) || msg.getLength() != MESSAGE_LENGTH) {
+            return;
+        }
+        long challenge = ByteBuffer.wrap(msg.getArray(), msg.getOffset() + HEARTBEAT.length, Long.BYTES).getLong();
+        View view = ch.getView();
+        if (hasMarker(msg, CHALLENGE)) {
+            // only the coordinator of the own view is answered: a stale coordinator gets no confirmation
+            if (view != null && !view.getMembers().isEmpty() && source.equals(view.getMembers().get(0))) {
+                send(ch, source, HEARTBEAT, challenge);
+            }
+        } else if (hasMarker(msg, HEARTBEAT) && recordHeartbeat(source, challenge) && !super.isLeader()
+                   && view != null && !view.getMembers().isEmpty()) {
+            // confirm the lead at once instead of on the next check
+            applyView(ch, view);
         }
     }
 
@@ -321,19 +480,36 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
 
 
     /**
-     * Test if a message is a heartbeat.
+     * Record the answer of a member to a challenge: it only counts for a challenge this node sent within the renew deadline,
+     * and it confirms the member as of the time the challenge was sent. A buffered or replayed answer to an older challenge
+     * does not count.
      *
-     * @param msg the message
-     * @return true if the message is a heartbeat
+     * @param member the member
+     * @param challenge the random number of the answered challenge
+     * @return true if the answer was recorded
      */
-    private static boolean isHeartbeat(Message msg) {
-        if (!(msg instanceof BytesMessage) || msg.getLength() != HEARTBEAT.length) {
+    boolean recordHeartbeat(Address member, long challenge) {
+        Long sent = challenges.get(challenge);
+        if (sent == null || System.nanoTime() - sent > getLeaderElectionConfiguration().getRenewDeadline().toNanos()) {
             return false;
         }
+        heartbeats.merge(member, sent, Math::max);
+        return true;
+    }
+
+
+    /**
+     * Test if a message starts with a marker.
+     *
+     * @param msg the message
+     * @param marker the marker
+     * @return true if the message starts with the marker
+     */
+    private static boolean hasMarker(Message msg, byte[] marker) {
         byte[] array = msg.getArray();
         int offset = msg.getOffset();
-        for (int i = 0; i < HEARTBEAT.length; i++) {
-            if (array[offset + i] != HEARTBEAT[i]) {
+        for (int i = 0; i < marker.length; i++) {
+            if (array[offset + i] != marker[i]) {
                 return false;
             }
         }
@@ -470,8 +646,8 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
                     if (!isInitialized() || ch != NetworkLeaderElectorImpl.this.channel || newView == null || newView.getMembers().isEmpty()) {
                         return;
                     }
-                    applyView(newView, ch.getAddress());
-                    sendHeartbeat(ch, newView, ch.getAddress());
+                    applyView(ch, newView);
+                    sendChallenge(ch, newView, ch.getAddress());
                 }
 
 
@@ -480,8 +656,8 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
                  */
                 @Override
                 public void receive(Message msg) {
-                    if (ch == NetworkLeaderElectorImpl.this.channel && msg.getSrc() != null && isHeartbeat(msg)) {
-                        recordHeartbeat(msg.getSrc());
+                    if (ch == NetworkLeaderElectorImpl.this.channel) {
+                        handleMessage(ch, msg);
                     }
                 }
             });
@@ -567,12 +743,14 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
 
 
     /**
-     * Encrypt the cluster messages with the shared key: a {@link SYM_ENCRYPT} protocol is inserted directly below
-     * {@link NAKACK2}, so that retransmissions are encrypted, too.
+     * Encrypt the cluster messages with the shared key. {@link SYM_ENCRYPT} is inserted directly above the transport, so that
+     * the messages of all protocols are encrypted, including discovery and failure detection; {@link SERIALIZE} above it
+     * packs each message with its headers (e.g. the sender) into the encrypted payload. The cipher runs in CBC mode with a
+     * random IV per message, so equal messages never give equal cipher texts.
      *
      * @param channel the channel, not yet connected
      * @param encryptionKey the shared key
-     * @throws IllegalStateException in case the stack already has an encryption protocol or no NAKACK2 protocol
+     * @throws IllegalStateException in case the stack already has an encryption protocol
      * @throws Exception in case the encryption could not be initialized
      */
     protected void addEncryption(JChannel channel, SecretKey encryptionKey) throws Exception {
@@ -581,15 +759,23 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
         if (existing != null) {
             throw new IllegalStateException("The JGroups configuration already contains [" + existing.getName() + "]: configure its key there or remove it to use the encryption key.");
         }
-        if (stack.findProtocol(NAKACK2.class) == null) {
-            throw new IllegalStateException("The JGroups configuration has no NAKACK2 protocol to place the encryption below.");
-        }
 
-        SYM_ENCRYPT encrypt = new SYM_ENCRYPT().setSecretKey(encryptionKey);
-        stack.insertProtocol(encrypt, ProtocolStack.Position.BELOW, NAKACK2.class);
-        // the stack is already initialized: insertProtocol() does not initialize the new protocol, connect() only starts it
-        encrypt.setProtocolStack(stack);
-        encrypt.init();
+        String symAlgorithm = encryptionKey.getAlgorithm() + "/CBC/PKCS5Padding";
+        int ivLength = Cipher.getInstance(symAlgorithm).getBlockSize();
+        SYM_ENCRYPT encrypt = new SYM_ENCRYPT();
+        encrypt.symAlgorithm(symAlgorithm);
+        encrypt.symIvLength(ivLength);
+        encrypt.setSecretKey(encryptionKey);
+        Class<? extends Protocol> transport = stack.getTransport().getClass();
+        stack.insertProtocol(encrypt, ProtocolStack.Position.ABOVE, transport);
+        SERIALIZE serialize = new SERIALIZE();
+        stack.insertProtocol(serialize, ProtocolStack.Position.ABOVE, SYM_ENCRYPT.class);
+
+        // the stack is already initialized: insertProtocol() does not initialize the new protocols, connect() only starts them
+        for (Protocol protocol : new Protocol[] {encrypt, serialize}) {
+            protocol.setProtocolStack(stack);
+            protocol.init();
+        }
     }
 
 
@@ -626,8 +812,11 @@ public class NetworkLeaderElectorImpl extends AbstractLeaderElectorImpl<NetworkL
                     }
                     return;
                 }
-                applyView(view, channel.getAddress());
-                sendHeartbeat(channel, view, channel.getAddress());
+                if (!applyView(channel, view)) {
+                    // the channel of this check was closed
+                    return;
+                }
+                sendChallenge(channel, view, channel.getAddress());
             } catch (Exception e) {
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Error occurred while verifying network cluster [{}]: {}", getLeaderElectionInformation().getUniqueName(), e.getMessage(), e);

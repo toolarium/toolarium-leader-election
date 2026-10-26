@@ -9,6 +9,7 @@ import com.github.toolarium.leader.election.dto.LeaderElectionConfiguration;
 import java.io.File;
 import java.security.KeyStore;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Objects;
 import javax.crypto.SecretKey;
 
@@ -132,11 +133,16 @@ public class NetworkLeaderElectionConfiguration extends LeaderElectionConfigurat
 
 
     /**
-     * Sets the shared key that encrypts the cluster messages. All nodes of the cluster need the same key.
+     * Sets the shared key that encrypts the cluster messages. All nodes of the cluster need the same key. Only an AES key of
+     * 128, 192 or 256 bits is accepted, e.g. created with {@code KeyGenerator.getInstance("AES")} or
+     * {@code keytool -genseckey -keyalg AES -keysize 256}: JGroups sends a hash of the key with every message, so a weak key
+     * (e.g. derived from a password) could be found from it.
      *
      * @param encryptionKey the encryption key, or {@code null} to not encrypt
+     * @throws IllegalArgumentException In case the key is no AES key of 128, 192 or 256 bits
      */
-    public void setEncryptionKey(SecretKey encryptionKey) {
+    public void setEncryptionKey(SecretKey encryptionKey) throws IllegalArgumentException {
+        validateEncryptionKey(encryptionKey);
         this.encryptionKey = encryptionKey;
     }
 
@@ -152,6 +158,31 @@ public class NetworkLeaderElectionConfiguration extends LeaderElectionConfigurat
      */
     public void setEncryptionKey(String keystore, char[] password, String alias) throws IllegalArgumentException {
         this.encryptionKey = loadEncryptionKey(keystore, password, alias);
+    }
+
+
+    /**
+     * Validate an encryption key: an AES key of 128, 192 or 256 bits.
+     *
+     * @param encryptionKey the encryption key or null
+     * @throws IllegalArgumentException In case the key is no AES key of 128, 192 or 256 bits
+     */
+    public static void validateEncryptionKey(SecretKey encryptionKey) throws IllegalArgumentException {
+        if (encryptionKey == null) {
+            return;
+        }
+        if (!"AES".equalsIgnoreCase(encryptionKey.getAlgorithm())) {
+            throw new IllegalArgumentException("Invalid encryption key: an AES key is required, but the key is a [" + encryptionKey.getAlgorithm() + "] key!");
+        }
+        byte[] encoded = encryptionKey.getEncoded();
+        if (encoded == null) {
+            throw new IllegalArgumentException("Invalid encryption key: the key cannot be exported, which the encryption needs!");
+        }
+        int length = encoded.length;
+        Arrays.fill(encoded, (byte) 0);
+        if (length != 16 && length != 24 && length != 32) {
+            throw new IllegalArgumentException("Invalid encryption key: an AES key of 128, 192 or 256 bits is required, but the key has " + (length * 8) + " bits!");
+        }
     }
 
 
@@ -188,7 +219,9 @@ public class NetworkLeaderElectionConfiguration extends LeaderElectionConfigurat
         if (!(entry instanceof KeyStore.SecretKeyEntry)) {
             throw new IllegalArgumentException("Keystore [" + keystore + "] has no secret key with alias [" + alias + "]!");
         }
-        return ((KeyStore.SecretKeyEntry) entry).getSecretKey();
+        SecretKey key = ((KeyStore.SecretKeyEntry) entry).getSecretKey();
+        validateEncryptionKey(key);
+        return key;
     }
 
 

@@ -599,12 +599,14 @@ public final class LeaderElectionFactory {
 
         /**
          * Encrypt all cluster messages with a shared key. A node without the key can neither read the
-         * messages nor join the cluster. All nodes of the cluster need the same key.
+         * messages nor join the cluster. All nodes of the cluster need the same key, an AES key of 128, 192 or 256 bits.
          *
          * @param encryptionKey the shared secret key
          * @return this builder
+         * @throws IllegalArgumentException In case the key is no AES key of 128, 192 or 256 bits
          */
-        public NetworkBuilder encryptionKey(SecretKey encryptionKey) {
+        public NetworkBuilder encryptionKey(SecretKey encryptionKey) throws IllegalArgumentException {
+            NetworkLeaderElectionConfiguration.validateEncryptionKey(encryptionKey);
             this.encryptionKey = encryptionKey;
             return this;
         }

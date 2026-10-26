@@ -188,6 +188,8 @@ public final class LeaderElectionExecutors {
         private final long overrunNanos;
         private final AtomicBoolean running = new AtomicBoolean(false);
         private final AtomicBoolean overrunReported = new AtomicBoolean(false);
+        // set when a run was skipped because the previous one was still active: the missed run follows right after it
+        private final AtomicBoolean runMissed = new AtomicBoolean(false);
         // true once a failure was warned about: further failures are logged at debug level until a run succeeds
         private final AtomicBoolean failureReported = new AtomicBoolean(false);
         private volatile boolean cancelled;
@@ -260,6 +262,7 @@ public final class LeaderElectionExecutors {
                 return;
             }
             if (!running.compareAndSet(false, true)) {
+                runMissed.set(true);
                 reportOverrun();
                 return;
             }
@@ -296,12 +299,17 @@ public final class LeaderElectionExecutors {
                     LOG.debug("Unexpected error in [{}]: {}", threadName, e.toString(), e);
                 }
                 if (failureReported.compareAndSet(false, true)) {
-                    LOG.warn("Unexpected error in [{}]: {}. Further errors are logged at debug level until a run succeeds. Please report it "
-                             + "if possible with the stack trace of the debug log.", threadName, e.toString());
+                    LOG.warn("Unexpected error in [{}]: {}. Further errors are logged at debug level until a run succeeds. Please report it, "
+                             + "if possible with the stack trace (enable debug logging).", threadName, e.toString());
                 }
             } finally {
                 current.setName(originalName);
                 finished();
+            }
+            // A run that took longer than the period made the next one wait for the following period: it runs now instead, e.g. so
+            // that a slow database round is followed by a renewal well before the renew deadline.
+            if (runMissed.getAndSet(false)) {
+                dispatch();
             }
         }
 

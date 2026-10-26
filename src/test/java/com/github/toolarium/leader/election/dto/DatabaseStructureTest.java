@@ -219,6 +219,21 @@ public class DatabaseStructureTest {
 
 
     /**
+     * A schema-qualified table name gives a valid constraint name: without the schema and without the dot.
+     */
+    @Test
+    public void testConstraintNameOfSchemaQualifiedTable() {
+        for (JDBCLeaderElectionDatabaseStructure s : new JDBCLeaderElectionDatabaseStructure[] {
+            new MySQLLeaderElectionDatabaseStructure(), new SQLServerLeaderElectionDatabaseStructure(), new OracleLeaderElectionDatabaseStructure()}) {
+            s.setTableName("myschema.LeaderElection");
+            String sql = s.createSQLTable();
+            assertTrue(sql.startsWith("CREATE TABLE myschema.LeaderElection"), sql);
+            assertTrue(sql.contains("CONSTRAINT pk_leaderelection "), s.getClass().getSimpleName() + ": " + sql);
+        }
+    }
+
+
+    /**
      * Test that the Oracle constraint name never exceeds 30 characters even for a long table name.
      */
     @Test

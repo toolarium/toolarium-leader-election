@@ -174,7 +174,7 @@ public class LeaderElectionDAOTest {
         long now = System.currentTimeMillis();
         long expiryThreshold = now - 10_000L;
         LeaderElectorRecord challenger = new LeaderElectorRecord(STEAL_GROUP, "instance-B", "user2");
-        int stolen = dao.stealLeadership(STEAL_GROUP, "uuid-old", expiryThreshold, now, challenger);
+        int stolen = dao.stealLeadership(STEAL_GROUP, "uuid-old", expiryThreshold, Long.MAX_VALUE, now, challenger);
         assertEquals(1, stolen, "Stealing an expired lease must succeed");
 
         // Verify the new leader record is stored
@@ -183,7 +183,7 @@ public class LeaderElectionDAOTest {
         assertEquals("instance-B", current.getInstance());
 
         // Second steal attempt with the stale id; row id has changed, must return 0
-        int secondSteal = dao.stealLeadership(STEAL_GROUP, "uuid-old", expiryThreshold, now,
+        int secondSteal = dao.stealLeadership(STEAL_GROUP, "uuid-old", expiryThreshold, Long.MAX_VALUE, now,
                 new LeaderElectorRecord(STEAL_GROUP, "instance-C", "user3"));
         assertEquals(0, secondSteal, "Stealing with an outdated id must fail");
 
@@ -191,7 +191,7 @@ public class LeaderElectionDAOTest {
         LeaderElectorRecord freshLeader = new LeaderElectorRecord("uuid-fresh", "freshgroup", "instance-A", USER, System.currentTimeMillis());
         assertEquals(1, dao.insertLeader(freshLeader));
         // expiryThreshold is in the past but the fresh lease is newer, so lease_ts > expiryThreshold
-        int noSteal = dao.stealLeadership("freshgroup", "uuid-fresh", expiryThreshold, now,
+        int noSteal = dao.stealLeadership("freshgroup", "uuid-fresh", expiryThreshold, Long.MAX_VALUE, now,
                 new LeaderElectorRecord("freshgroup", "instance-B", "user2"));
         assertEquals(0, noSteal, "Stealing a non-expired lease must fail");
     }

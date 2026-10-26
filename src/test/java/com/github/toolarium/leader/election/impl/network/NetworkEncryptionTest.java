@@ -15,6 +15,7 @@ import com.github.toolarium.leader.election.LeaderElectionFactory;
 import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.dto.network.NetworkLeaderElectionConfiguration;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -23,11 +24,12 @@ import java.time.Duration;
 import java.util.List;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
 import org.jgroups.Global;
 import org.jgroups.JChannel;
 import org.jgroups.conf.ConfiguratorFactory;
+import org.jgroups.protocols.SERIALIZE;
 import org.jgroups.protocols.SYM_ENCRYPT;
-import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.stack.Protocol;
 import org.junit.jupiter.api.Test;
 
@@ -67,40 +69,50 @@ public class NetworkEncryptionTest {
 
 
     /**
-     * The encryption is inserted directly below NAKACK2; a stack that already has an encryption protocol is rejected.
+     * Only an AES key of 128, 192 or 256 bits is accepted: JGroups sends a hash of the key with every message, so a weak key
+     * could be found from it.
      *
      * @throws Exception in case of an error
      */
     @Test
-    public void testEncryptionIsInsertedBelowNakack() throws Exception {
+    public void testWeakKeysAreRejected() throws Exception {
+        NetworkLeaderElectionConfiguration config = new NetworkLeaderElectionConfiguration();
+        config.setEncryptionKey(createKey());
+        config.setEncryptionKey(null);
+
+        SecretKey des = KeyGenerator.getInstance("DESede").generateKey();
+        assertThrows(IllegalArgumentException.class, () -> config.setEncryptionKey(des), "A non-AES key must be rejected");
+        SecretKey shortKey = new SecretKeySpec("password".getBytes(StandardCharsets.UTF_8), "AES");
+        assertThrows(IllegalArgumentException.class, () -> config.setEncryptionKey(shortKey), "A key of 64 bits must be rejected");
+        assertThrows(IllegalArgumentException.class, () -> LeaderElectionFactory.builder().name("weak-key").network().encryptionKey(shortKey));
+        assertThrows(IllegalArgumentException.class, () -> NetworkLeaderElectionConfiguration.loadEncryptionKey(writeKeystore(des, "JCEKS"), PASSWORD.toCharArray(), ALIAS),
+                "A weak key from a keystore must be rejected");
+    }
+
+
+    /**
+     * The encryption is inserted directly above the transport with SERIALIZE above it, so that all messages including their
+     * headers are encrypted; it uses CBC mode with an IV. A stack that already has an encryption protocol is rejected.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testEncryptionIsInsertedAboveTransport() throws Exception {
         NetworkLeaderElectorImpl elector = new NetworkLeaderElectorImpl(new LeaderElectionInformation("network-encryption-stack"), new NetworkLeaderElectionConfiguration());
         try (JChannel channel = new JChannel(ConfiguratorFactory.getStackConfigurator(Global.DEFAULT_PROTOCOL_STACK))) {
             SecretKey key = createKey();
             elector.addEncryption(channel, key);
 
             List<Protocol> protocols = channel.getProtocolStack().getProtocols(); // top to bottom
-            int nakack = protocols.indexOf(channel.getProtocolStack().findProtocol(NAKACK2.class));
-            assertTrue(protocols.get(nakack + 1) instanceof SYM_ENCRYPT, "SYM_ENCRYPT must be directly below NAKACK2");
-            assertEquals(key, ((SYM_ENCRYPT) protocols.get(nakack + 1)).secretKey());
+            int transport = protocols.indexOf(channel.getProtocolStack().getTransport());
+            assertTrue(protocols.get(transport - 1) instanceof SYM_ENCRYPT, "SYM_ENCRYPT must be directly above the transport");
+            assertTrue(protocols.get(transport - 2) instanceof SERIALIZE, "SERIALIZE must be directly above SYM_ENCRYPT");
+            SYM_ENCRYPT encrypt = (SYM_ENCRYPT) protocols.get(transport - 1);
+            assertEquals(key, encrypt.secretKey());
+            assertEquals("AES/CBC/PKCS5Padding", encrypt.symAlgorithm());
+            assertEquals(16, encrypt.simIvLength());
 
             assertThrows(IllegalStateException.class, () -> elector.addEncryption(channel, key));
-        } finally {
-            elector.close();
-        }
-    }
-
-
-    /**
-     * A stack without NAKACK2 is rejected: there is no place for the encryption.
-     *
-     * @throws Exception in case of an error
-     */
-    @Test
-    public void testStackWithoutNakackIsRejected() throws Exception {
-        NetworkLeaderElectorImpl elector = new NetworkLeaderElectorImpl(new LeaderElectionInformation("network-encryption-no-nakack"), new NetworkLeaderElectionConfiguration());
-        try (JChannel channel = new JChannel(ConfiguratorFactory.getStackConfigurator(Global.DEFAULT_PROTOCOL_STACK))) {
-            channel.getProtocolStack().removeProtocol(NAKACK2.class);
-            assertThrows(IllegalStateException.class, () -> elector.addEncryption(channel, createKey()));
         } finally {
             elector.close();
         }

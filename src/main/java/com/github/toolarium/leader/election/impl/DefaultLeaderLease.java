@@ -9,6 +9,7 @@ import com.github.toolarium.leader.election.ILeaderLease;
 import com.github.toolarium.leader.election.dto.ILeaderElectionConfiguration;
 import com.github.toolarium.leader.election.dto.ILeaderElectionInformation;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -89,6 +90,15 @@ final class DefaultLeaderLease implements ILeaderLease {
     @Override
     public Instant getLeaderSince() {
         return elector.getLeaderElectorTimestamp();
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.ILeaderLease#getRemainingLeadTime()
+     */
+    @Override
+    public Duration getRemainingLeadTime() {
+        return elector.getRemainingLeadTime();
     }
 
 

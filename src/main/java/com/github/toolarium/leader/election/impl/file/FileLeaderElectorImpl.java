@@ -17,6 +17,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -25,6 +27,7 @@ import java.security.NoSuchAlgorithmException;
  * @author patrick
  */
 public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderElectionConfiguration> {
+    private static final Logger LOG = LoggerFactory.getLogger(FileLeaderElectorImpl.class);
     // volatile: written by elect()/close() and read by runIfLeader task threads in extendLeaseNow()
     // and by the JVM shutdown hook.
     private volatile FileLock fileLock;
@@ -47,8 +50,11 @@ public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderE
      */
     @Override
     protected void initializeImplementation() throws LeaderElectionException {
-        FileLeaderElectionConfiguration.createBasePath(null);
         String basePath = getLeaderElectionConfiguration().getBasePath();
+        if (basePath.equals(FileLeaderElectionConfiguration.createBasePath(null))) {
+            LOG.info("The lock file of [{}] is in the temporary directory [{}]; all competing processes must see this directory, otherwise configure a shared base path.",
+                     getLeaderElectionInformation().getUniqueName(), basePath);
+        }
         File file = new File(basePath, createLockFileName(getLeaderElectionInformation().getElectionGroupName()));
         Path baseDirectory = Paths.get(basePath).toAbsolutePath().normalize();
         if (!baseDirectory.equals(file.toPath().toAbsolutePath().normalize().getParent())) {
@@ -133,6 +139,20 @@ public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderE
 
 
     /**
+     * @see com.github.toolarium.leader.election.ILeaderElector#isLeader()
+     *     The lead only counts while the lock was confirmed within the renew deadline: a lock handler that hangs (e.g. on a
+     *     stalled network file system) or a lock lost without notice must not keep this node leading.
+     */
+    @Override
+    public boolean isLeader() {
+        if (!super.isLeader()) {
+            return false;
+        }
+        return System.nanoTime() - getLeadConfirmedNanos() <= getLeaderElectionConfiguration().getRenewDeadline().toNanos();
+    }
+
+
+    /**
      * @see com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl#extendLeaseNow()
      */
     @Override
@@ -141,6 +161,11 @@ public class FileLeaderElectorImpl extends AbstractLeaderElectorImpl<FileLeaderE
         FileLock currentLock = fileLock;
         if (!isLeader() || currentLock == null) {
             return false;
+        }
+        // A lock renewed a moment ago is fresh: an application that extends e.g. per processed item must not cause file system
+        // calls per item, which are slow on a network file system.
+        if (currentLock.getLockAgeNanos() < getLeaderElectionConfiguration().getRetryPeriod().toNanos() / 2) {
+            return true;
         }
         try {
             currentLock.renew();

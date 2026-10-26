@@ -16,18 +16,28 @@ import org.slf4j.LoggerFactory;
 /**
  * Checks the leases of the running tasks and interrupts a task as soon as its lead is lost. The lead is lost locally
  * after the renew deadline, another instance can take over after the timeout: the check period is far below this
- * margin. The checks run on the scheduler shared by all electors ({@link LeaderElectionExecutors#getLeaseMonitorScheduler()})
- * and are only scheduled while tasks are running.
+ * margin. One check for all electors of the JVM runs on the shared scheduler ({@link LeaderElectionExecutors#getLeaseMonitorScheduler()})
+ * while tasks are running; it stops after a short idle time, so that short tasks run one after another do not schedule it
+ * again each time.
  *
  * @author patrick
  */
 final class LeaderLeaseMonitor {
     private static final Logger LOG = LoggerFactory.getLogger(LeaderLeaseMonitor.class);
     private static final long CHECK_PERIOD_MILLIS = 100L;
+    // the shared check stops after this many checks without a running task (1 s)
+    private static final int IDLE_CHECKS_BEFORE_STOP = 10;
+    // the monitors with running tasks, checked by the shared check
+    private static final Set<LeaderLeaseMonitor> ACTIVE_MONITORS = ConcurrentHashMap.newKeySet();
+    private static final Object SHARED_CHECK_LOCK = new Object();
+    // guarded by SHARED_CHECK_LOCK
+    private static ScheduledFuture<?> sharedCheck;
+    private static int idleChecks;
+    // true while the shared check is scheduled: a task start then needs no global lock. Written under SHARED_CHECK_LOCK.
+    private static volatile boolean sharedCheckRunning;
 
     private final Set<DefaultLeaderLease> leases = ConcurrentHashMap.newKeySet();
     private boolean started;
-    private ScheduledFuture<?> scheduledTask;
     // written by the shared check thread and by stop()
     private volatile int consecutiveCheckFailures;
     // true once the current run of failures was warned about: further failures are logged at debug level until a check succeeds
@@ -41,6 +51,9 @@ final class LeaderLeaseMonitor {
      */
     synchronized void start() {
         started = true;
+        if (!leases.isEmpty()) {
+            activate();
+        }
     }
 
 
@@ -53,49 +66,111 @@ final class LeaderLeaseMonitor {
         // A last check right away: close() may not wait for the running tasks (called from one of them, or the close timeout
         // passed), and the periodic check is cancelled below. The calling thread is not interrupted: it is closing the elector.
         checkLeases(Thread.currentThread());
-        if (scheduledTask != null) {
-            scheduledTask.cancel(false);
-            scheduledTask = null;
-        }
+        ACTIVE_MONITORS.remove(this);
         consecutiveCheckFailures = 0;
         failureReported = false;
     }
 
 
     /**
-     * Monitor the lease of a running task. Starts the periodic check task on the
-     * first registration so the shared thread does not poll when idle.
+     * Monitor the lease of a running task.
      *
      * @param lease the lease
      */
     synchronized void register(DefaultLeaderLease lease) {
+        boolean first = leases.isEmpty();
         leases.add(lease);
-        if (scheduledTask == null && started) {
-            scheduledTask = LeaderElectionExecutors.getInstance().getLeaseMonitorScheduler().scheduleWithFixedDelay(this::check, CHECK_PERIOD_MILLIS, CHECK_PERIOD_MILLIS, TimeUnit.MILLISECONDS);
+        if (started && (first || !sharedCheckRunning)) {
+            activate();
         }
     }
 
 
     /**
-     * Stop monitoring the lease of an ended task. Cancels the periodic check task
-     * when the last lease is removed so the shared thread does not poll when idle.
+     * Stop monitoring the lease of an ended task.
      *
      * @param lease the lease
      */
     synchronized void unregister(DefaultLeaderLease lease) {
         leases.remove(lease);
-        if (leases.isEmpty() && scheduledTask != null) {
-            scheduledTask.cancel(false);
-            scheduledTask = null;
+        if (leases.isEmpty()) {
+            ACTIVE_MONITORS.remove(this);
         }
     }
 
 
     /**
-     * Interrupt tasks that have lost the lead.
+     * Add this monitor to the shared check and make sure the shared check runs.
      */
-    private void check() {
-        checkLeases(null);
+    private void activate() {
+        // Added before the flag is read; the shared check clears the flag before it reads the monitors: either this sees the
+        // check stopped and schedules it, or the check sees this monitor and schedules itself again.
+        ACTIVE_MONITORS.add(this);
+        if (!sharedCheckRunning) {
+            scheduleSharedCheck();
+        }
+    }
+
+
+    /**
+     * Schedule the shared check if it is not scheduled.
+     */
+    private static void scheduleSharedCheck() {
+        synchronized (SHARED_CHECK_LOCK) {
+            idleChecks = 0;
+            if (sharedCheck == null) {
+                sharedCheck = LeaderElectionExecutors.getInstance().getLeaseMonitorScheduler().scheduleWithFixedDelay(LeaderLeaseMonitor::checkAll,
+                        CHECK_PERIOD_MILLIS, CHECK_PERIOD_MILLIS, TimeUnit.MILLISECONDS);
+            }
+            sharedCheckRunning = true;
+        }
+    }
+
+
+    /**
+     * The shared check: interrupt the tasks of all electors that have lost the lead; stops after a short idle time.
+     */
+    private static void checkAll() {
+        for (LeaderLeaseMonitor monitor : ACTIVE_MONITORS) {
+            monitor.checkLeases(null);
+        }
+        synchronized (SHARED_CHECK_LOCK) {
+            if (!ACTIVE_MONITORS.isEmpty()) {
+                idleChecks = 0;
+            } else if (++idleChecks >= IDLE_CHECKS_BEFORE_STOP && sharedCheck != null) {
+                sharedCheckRunning = false;
+                // a monitor activated meanwhile, which may not have seen the cleared flag: keep checking
+                if (!ACTIVE_MONITORS.isEmpty()) {
+                    sharedCheckRunning = true;
+                    idleChecks = 0;
+                    return;
+                }
+                sharedCheck.cancel(false);
+                sharedCheck = null;
+            }
+        }
+    }
+
+
+    /**
+     * Test if the shared check is scheduled.
+     *
+     * @return true if the shared check is scheduled
+     */
+    static boolean isSharedCheckScheduled() {
+        synchronized (SHARED_CHECK_LOCK) {
+            return sharedCheck != null;
+        }
+    }
+
+
+    /**
+     * Get the number of monitors with running tasks.
+     *
+     * @return the number of monitors with running tasks
+     */
+    static int getActiveMonitorCount() {
+        return ACTIVE_MONITORS.size();
     }
 
 
@@ -125,7 +200,7 @@ final class LeaderLeaseMonitor {
             if (!failureReported) {
                 failureReported = true;
                 LOG.warn("Unexpected error checking the leader leases: {}. Tasks may not be interrupted when the lead is lost. Further errors "
-                         + "are logged at debug level until a check succeeds. Please report it with the stack trace of the debug log.", e.toString());
+                         + "are logged at debug level until a check succeeds. Please report it, if possible with the stack trace (enable debug logging).", e.toString());
             }
         }
     }

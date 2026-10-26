@@ -38,6 +38,7 @@ public class LeaderElectionDAONonAutoCommitTest {
 
     private static final String USER = "user";
     private static final String INST_1 = "inst-1";
+    private static final String UPDATE_GROUP = "upd-group";
 
 
     /**
@@ -96,20 +97,25 @@ public class LeaderElectionDAONonAutoCommitTest {
         dao.init();
 
         // Insert an initial leader record.
-        LeaderElectorRecord initial = new LeaderElectorRecord("upd-group", INST_1, USER);
+        LeaderElectorRecord initial = new LeaderElectorRecord(UPDATE_GROUP, INST_1, USER);
         assertEquals(1, dao.insertLeader(initial));
 
         // Renew the lease: update with a new id and a fresh timestamp.
-        LeaderElectorRecord renewed = new LeaderElectorRecord("upd-group", INST_1, USER);
-        int updated = dao.updateLeaderTimestamp("upd-group", INST_1, renewed.getId(), renewed.getTimestamp());
+        LeaderElectorRecord renewed = new LeaderElectorRecord(UPDATE_GROUP, INST_1, USER);
+        int updated = dao.updateLeaderTimestamp(UPDATE_GROUP, INST_1, initial.getId(), renewed.getId(), renewed.getTimestamp());
         assertEquals(1, updated, "UPDATE must succeed");
 
         // If commitIfNeeded is missing the UPDATE was rolled back; the SELECT would return the
         // old id.  With the fix the new id is visible.
-        LeaderElectorRecord found = dao.selectLeaderByName("upd-group");
+        LeaderElectorRecord found = dao.selectLeaderByName(UPDATE_GROUP);
         assertNotNull(found);
         assertEquals(renewed.getId(), found.getId(),
                 "Renewed record id must be visible after updateLeaderTimestamp(); missing commit would leave the old id");
+
+        // a late renewal that still expects the old record id (e.g. of a closed session) must not overwrite the row
+        LeaderElectorRecord late = new LeaderElectorRecord(UPDATE_GROUP, INST_1, USER);
+        assertEquals(0, dao.updateLeaderTimestamp(UPDATE_GROUP, INST_1, initial.getId(), late.getId(), 1L), "A renewal with an outdated record id must not match");
+        assertEquals(renewed.getId(), dao.selectLeaderByName(UPDATE_GROUP).getId());
     }
 
 

@@ -12,6 +12,7 @@ import com.github.toolarium.leader.election.dto.db.MariaDBLeaderElectionDatabase
 import com.github.toolarium.leader.election.dto.db.MySQLLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.OracleLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.SQLServerLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.impl.LogText;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -132,10 +133,24 @@ public class LeaderElectionDAO {
 
 
     /**
-     * Ensure the database structure is initialized, detecting it from the connection if null.
+     * Get the database structure, detecting it from the connection on first use.
      *
      * @param conn an active database connection
+     * @return the database structure
      * @throws SQLException in case of a database error
+     */
+    private LeaderElectionDatabaseStructure getStructure(Connection conn) throws SQLException {
+        ensureStructure(conn);
+        return leaderElectionDatabaseStructure;
+    }
+
+
+    /**
+     * Detect the database structure on first use, unless it is configured. Every statement needs it: an elector whose schema
+     * was already validated by another elector of the data source does not run the initialization that detects it.
+     *
+     * @param conn the connection
+     * @throws SQLException In case of a database error
      */
     private void ensureStructure(Connection conn) throws SQLException {
         // Fast path: already initialised (volatile read; avoids lock acquisition on every tick).
@@ -163,7 +178,7 @@ public class LeaderElectionDAO {
      * @param productName the value returned by {@link DatabaseMetaData#getDatabaseProductName()}
      * @return the matching {@link LeaderElectionDatabaseStructure}
      */
-    private LeaderElectionDatabaseStructure detectDatabaseStructure(String productName) {
+    LeaderElectionDatabaseStructure detectDatabaseStructure(String productName) {
         String p = productName.toLowerCase(Locale.ROOT);
         if (p.contains("oracle")) {
             return new OracleLeaderElectionDatabaseStructure();
@@ -187,7 +202,7 @@ public class LeaderElectionDAO {
      */
     public int insertLeader(LeaderElectorRecord leaderElectorRecord) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLInsertLeader())) {
+             PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLInsertLeader())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {
                 leaderElectorRecord.getId(), leaderElectorRecord.getName(),
@@ -218,7 +233,7 @@ public class LeaderElectionDAO {
      */
     public int deleteLeaderByName(String name) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByName())) {
+             PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLDeleteLeaderByName())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {name});
             int rows = stmt.executeUpdate();
@@ -238,7 +253,7 @@ public class LeaderElectionDAO {
      */
     public int deleteLeaderByInstance(String instanceId) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByInstance())) {
+             PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLDeleteLeaderByInstance())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {instanceId});
             int rows = stmt.executeUpdate();
@@ -260,7 +275,7 @@ public class LeaderElectionDAO {
      */
     public int deleteLeaderByNameAndInstance(String name, String instanceId) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-            PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderByNameAndInstance())) {
+            PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLDeleteLeaderByNameAndInstance())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {name, instanceId});
             int rows = stmt.executeUpdate();
@@ -282,7 +297,7 @@ public class LeaderElectionDAO {
      */
     public int deleteLeaderRecord(String name, String instanceId, String recordId) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-            PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLDeleteLeaderRecord())) {
+            PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLDeleteLeaderRecord())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {name, instanceId, recordId});
             int rows = stmt.executeUpdate();
@@ -301,7 +316,7 @@ public class LeaderElectionDAO {
      */
     public LeaderElectorRecord selectLeaderByName(String name) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLSelectLeaderByName())) {
+             PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLSelectLeaderByName())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {name});
             try (ResultSet rs = stmt.executeQuery()) {
@@ -326,7 +341,7 @@ public class LeaderElectionDAO {
                     }
                     LeaderElectorRecord record = new LeaderElectorRecord((String) columns[0], (String) columns[1], (String) columns[2], (String) columns[3], leaseTs, forceReleaseDeadline);
                     if (LOG.isDebugEnabled()) {
-                        LOG.debug("Leader found: id={}, name={}, instance={}", record.getId(), record.getName(), record.getInstance());
+                        LOG.debug("Leader found: id={}, name={}, instance={}", LogText.getInstance().of(record.getId()), LogText.getInstance().of(record.getName()), LogText.getInstance().of(record.getInstance()));
                     }
                     return record;
                 }
@@ -400,16 +415,17 @@ public class LeaderElectionDAO {
      *
      * @param name the election group name
      * @param instanceId the elector's stable instance id
+     * @param expectedId the record id the row must still hold
      * @param newId the new record id (UUID)
      * @param timestamp the new lease timestamp as epoch milliseconds
      * @return number of updated rows (1 on success, 0 if we are no longer the leader)
      * @throws SQLException In case of a database error
      */
-    public int updateLeaderTimestamp(String name, String instanceId, String newId, long timestamp) throws SQLException {
+    public int updateLeaderTimestamp(String name, String instanceId, String expectedId, String newId, long timestamp) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLUpdateLeaderTimestamp())) {
+             PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLUpdateLeaderTimestamp())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
-            JDBCUtil.getInstance().setValues(stmt, new Object[] {newId, timestamp, name, instanceId});
+            JDBCUtil.getInstance().setValues(stmt, new Object[] {newId, timestamp, name, instanceId, expectedId});
             int rows = stmt.executeUpdate();
             commitIfNeeded(conn);
             return rows;
@@ -422,7 +438,8 @@ public class LeaderElectionDAO {
      * The update only succeeds when the row's id still matches {@code currentLeaderId} AND either:
      * <ul>
      *   <li>the lease has expired ({@code lease_ts < expiryThreshold}), OR</li>
-     *   <li>an admin force-release deadline has elapsed ({@code force_release_deadline IS NOT NULL AND force_release_deadline <= dbNow}).</li>
+     *   <li>an admin force-release deadline has elapsed ({@code force_release_deadline IS NOT NULL AND force_release_deadline <= dbNow}), OR</li>
+     *   <li>the lease or the deadline is after {@code futureLimit}: no healthy node writes such a value.</li>
      * </ul>
      * The stolen row has {@code force_release_deadline} reset to {@code NULL}.
      * Returns 0 when another node won the race (no matching row updated).
@@ -430,18 +447,19 @@ public class LeaderElectionDAO {
      * @param name the election group name
      * @param currentLeaderId the id of the row we expect to steal
      * @param expiryThreshold epoch-millis threshold: the stored lease_ts must be strictly less than this value
+     * @param futureLimit epoch-millis limit: a stored lease_ts or force_release_deadline after it is implausible and counts as expired
      * @param dbNow current DB-clock epoch millis for the force-release deadline comparison
      * @param newRecord the challenger's new leader record
      * @return number of updated rows (1 on success, 0 if the row no longer matches)
      * @throws SQLException In case of a database error
      */
-    public int stealLeadership(String name, String currentLeaderId, long expiryThreshold, long dbNow, LeaderElectorRecord newRecord) throws SQLException {
+    public int stealLeadership(String name, String currentLeaderId, long expiryThreshold, long futureLimit, long dbNow, LeaderElectorRecord newRecord) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLStealLeadership())) {
+             PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLStealLeadership())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {
                 newRecord.getId(), newRecord.getInstance(), newRecord.getUser(),
-                newRecord.getTimestamp(), name, currentLeaderId, expiryThreshold, dbNow
+                newRecord.getTimestamp(), name, currentLeaderId, expiryThreshold, futureLimit, dbNow, futureLimit
             });
             int rows = stmt.executeUpdate();
             commitIfNeeded(conn);
@@ -462,7 +480,7 @@ public class LeaderElectionDAO {
      */
     public int setForceReleaseDeadline(String instanceId, long deadlineMillis) throws SQLException {
         try (Connection conn = leaderElectionConfiguration.getDataSource().getConnection();
-             PreparedStatement stmt = conn.prepareStatement(leaderElectionDatabaseStructure.createSQLSetForceReleaseDeadline())) {
+             PreparedStatement stmt = conn.prepareStatement(getStructure(conn).createSQLSetForceReleaseDeadline())) {
             stmt.setQueryTimeout(queryTimeoutSeconds);
             JDBCUtil.getInstance().setValues(stmt, new Object[] {deadlineMillis, instanceId});
             int rows = stmt.executeUpdate();
@@ -606,22 +624,12 @@ public class LeaderElectionDAO {
      * @throws SQLException in case of a database error
      */
     protected Set<String> getExistingColumns(Connection conn) throws SQLException {
-        String tableName = leaderElectionDatabaseStructure.getTableName();
         DatabaseMetaData metaData = conn.getMetaData();
-        String schema = null;
-        try {
-            schema = conn.getSchema();
-        } catch (Exception e) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("Could not retrieve schema for column lookup: {}", e.getMessage());
-            }
-        }
-
-        for (String nameToTry : new String[]{tableName, tableName.toUpperCase(), tableName.toLowerCase()}) {
+        for (String[] lookup : getTableLookups(conn, metaData)) {
             Set<String> columns = new LinkedHashSet<>();
-            try (ResultSet rs = metaData.getColumns(null, schema, nameToTry, null)) {
+            try (ResultSet rs = metaData.getColumns(null, lookup[0], lookup[1], null)) {
                 while (rs.next()) {
-                    columns.add(rs.getString("COLUMN_NAME").toLowerCase());
+                    columns.add(rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT));
                 }
             }
             if (!columns.isEmpty()) {
@@ -668,19 +676,8 @@ public class LeaderElectionDAO {
     protected boolean existDatabaseTable(Connection conn) throws SQLException {
         String tableName = leaderElectionDatabaseStructure.getTableName();
         DatabaseMetaData metaData = conn.getMetaData();
-        String schema = null;
-        try {
-            schema = conn.getSchema();
-        } catch (Exception e) {
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("Could not retrieve schema, searching all schemas: {}", e.getMessage());
-            }
-        }
-
-        // Try exact case, then uppercase (Oracle), then lowercase (PostgreSQL); databases differ
-        // in how they fold unquoted identifiers in their metadata catalog.
-        for (String nameToTry : new String[]{tableName, tableName.toUpperCase(), tableName.toLowerCase()}) {
-            try (ResultSet rs = metaData.getTables(null, schema, nameToTry, new String[]{"TABLE"})) {
+        for (String[] lookup : getTableLookups(conn, metaData)) {
+            try (ResultSet rs = metaData.getTables(null, lookup[0], lookup[1], new String[]{"TABLE"})) {
                 if (rs.next()) {
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("Table [{}] found.", tableName);
@@ -693,5 +690,82 @@ public class LeaderElectionDAO {
             LOG.debug("Table [{}] not found.", tableName);
         }
         return false;
+    }
+
+
+    /**
+     * Get the schema and table patterns to look the table up in the metadata catalog. A schema prefix of the table name
+     * ({@code schema.table}) is used as the schema, otherwise the schema of the connection. The names are tried as given,
+     * then in uppercase (e.g. Oracle) and in lowercase (e.g. PostgreSQL), since databases fold unquoted identifiers
+     * differently. The catalog takes LIKE patterns, so {@code _} and {@code %} are escaped.
+     *
+     * @param conn the connection
+     * @param metaData the metadata of the connection
+     * @return the lookups, each with the schema pattern (or null for any schema) and the table pattern
+     * @throws SQLException in case of a database error
+     */
+    private List<String[]> getTableLookups(Connection conn, DatabaseMetaData metaData) throws SQLException {
+        String tableName = leaderElectionDatabaseStructure.getTableName();
+        String schema = null;
+        int dot = tableName.lastIndexOf('.');
+        if (dot > 0) {
+            schema = tableName.substring(0, dot);
+            tableName = tableName.substring(dot + 1);
+        } else {
+            try {
+                schema = conn.getSchema();
+            } catch (Exception | AbstractMethodError e) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Could not retrieve schema, searching all schemas: {}", e.getMessage());
+                }
+            }
+        }
+
+        String escape = metaData.getSearchStringEscape();
+        List<String[]> lookups = new ArrayList<>();
+        lookups.add(new String[] {escapePattern(schema, escape), escapePattern(tableName, escape)});
+        lookups.add(new String[] {escapePattern(toCase(schema, true), escape), escapePattern(tableName.toUpperCase(Locale.ROOT), escape)});
+        lookups.add(new String[] {escapePattern(toCase(schema, false), escape), escapePattern(tableName.toLowerCase(Locale.ROOT), escape)});
+        return lookups;
+    }
+
+
+    /**
+     * Change the case of a name, independent of the default locale.
+     *
+     * @param name the name or null
+     * @param upper true for uppercase, false for lowercase
+     * @return the name in the case or null
+     */
+    private static String toCase(String name, boolean upper) {
+        if (name == null) {
+            return null;
+        }
+        if (upper) {
+            return name.toUpperCase(Locale.ROOT);
+        }
+        return name.toLowerCase(Locale.ROOT);
+    }
+
+
+    /**
+     * Escape the LIKE wildcards of a name for a metadata pattern.
+     *
+     * @param name the name or null
+     * @param escape the search string escape of the driver, or null/empty if it has none
+     * @return the pattern or null
+     */
+    static String escapePattern(String name, String escape) {
+        if (name == null || escape == null || escape.isEmpty()) {
+            return name;
+        }
+        StringBuilder pattern = new StringBuilder(name.length() + 4);
+        for (char c : name.toCharArray()) {
+            if (c == '_' || c == '%' || escape.indexOf(c) >= 0) {
+                pattern.append(escape);
+            }
+            pattern.append(c);
+        }
+        return pattern.toString();
     }
 }

@@ -5,15 +5,15 @@
  */
 package com.github.toolarium.leader.election.impl.file;
 
+import com.github.toolarium.leader.election.impl.LeaderElectionExecutors;
 import com.github.toolarium.leader.election.impl.file.exception.FileLockException;
 import java.io.File;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,13 +27,15 @@ import org.slf4j.LoggerFactory;
 public final class FileLockFactory {
     private static final Logger LOG = LoggerFactory.getLogger(FileLockFactory.class);
     private static final String LOG_SEP = "] [";
+    private static final String HANDLER_THREAD_NAME = "leader-election-file-lock";
+    private static final String RENEW_THREAD_NAME = "leader-election-file-renew";
     private Map<FileLock, Long> fileLockMap;
-    // volatile: written by startSchedule() (constructor + setScheduleInterval()) and read by the
-    // JVM shutdown hook thread; without volatile the hook may see stale null values and skip
-    // cancel()/shutdown() (TS-2).
-    private volatile ScheduledExecutorService scheduledExecuterService;
-    private volatile ScheduledFuture<?> scheduledFuture;
-    private int scheduleInterval = 1; 
+    // the renewal that runs per lock, so that a lock is not renewed twice at the same time
+    private final Map<FileLock, Future<?>> runningRenewals = new ConcurrentHashMap<>();
+    // The lock handler runs on the shared executors only while file locks exist. Guarded by this factory's monitor.
+    private LeaderElectionExecutors.PeriodicTask handlerTask;
+    private int scheduleInterval = 1;
+    private boolean shutdown;
 
     
     /**
@@ -51,7 +53,8 @@ public final class FileLockFactory {
      */
     private FileLockFactory() {
         fileLockMap = new ConcurrentHashMap<FileLock, Long>();
-        startSchedule();
+        handlerTask = null;
+        shutdown = false;
 
         Runtime.getRuntime().addShutdownHook(
                 new Thread(FileLockFactory.class.getName() + ": Shutdown hook") { // add shutdown hook
@@ -84,12 +87,35 @@ public final class FileLockFactory {
      *
      * @param seconds the schedule interval in seconds
      */
-    public void setScheduleInterval(int seconds) {
+    public synchronized void setScheduleInterval(int seconds) {
         if (scheduleInterval != seconds) {
             this.scheduleInterval = seconds;
-            shutdownSchedule();
-            startSchedule();
+            if (handlerTask != null) {
+                handlerTask.cancel();
+                handlerTask = null;
+                scheduleIfNeeded();
+            }
         }
+    }
+
+
+    /**
+     * Test if the lock handler is scheduled. It only runs while file locks exist.
+     *
+     * @return true if the lock handler is scheduled
+     */
+    synchronized boolean isScheduled() {
+        return handlerTask != null;
+    }
+
+
+    /**
+     * Get the number of file locks of this factory.
+     *
+     * @return the number of file locks
+     */
+    int getLockCount() {
+        return fileLockMap.size();
     }
     
     
@@ -141,13 +167,15 @@ public final class FileLockFactory {
      */
     public FileLock tryLock(final File file, Duration lockPeriod, Duration renewDeadline, Duration retryPeriod) {
         FileLock fileLock = new FileLock(file, lockPeriod, renewDeadline, retryPeriod);
-        fileLockMap.put(fileLock, ThreadUtil.getInstance().getThreadId());
-
         try {
             fileLock.lock();
         } catch (FileLockException ex) {
             LOG.info("Could not acquire file lock [{}] [{}]: {}, will retry on next election tick.", fileLock.getId(), fileLock.getFile(), ex.getMessage());
         }
+
+        // registered after the first attempt: the lock handler runs at once and must not compete with that attempt
+        fileLockMap.put(fileLock, ThreadUtil.getInstance().getThreadId());
+        scheduleIfNeeded();
         return fileLock;
     }
 
@@ -163,6 +191,8 @@ public final class FileLockFactory {
         }
 
         fileLockMap.remove(fileLock);
+        runningRenewals.remove(fileLock);
+        cancelScheduleIfIdle();
         try {
             fileLock.close();
         } catch (Exception e) {
@@ -189,6 +219,13 @@ public final class FileLockFactory {
             }
             try {
                 for (FileLock fileLock : fileLockMap.keySet()) {
+                    if (fileLock.isClosed()) {
+                        // closed by its owner without release(): nothing to renew anymore
+                        fileLockMap.remove(fileLock);
+                        runningRenewals.remove(fileLock);
+                        cancelScheduleIfIdle();
+                        continue;
+                    }
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("Verify lock " + fileLock);
                     }
@@ -203,25 +240,23 @@ public final class FileLockFactory {
                         lockTime = lockInstant.toEpochMilli();
                     }
                     
-                    if (fileLock.getRenewDeadline() != null) {
+                    // read once: close() clears the fields concurrently
+                    Duration renewDeadline = fileLock.getRenewDeadline();
+                    Duration lockPeriod = fileLock.getLockPeriod();
+                    if (renewDeadline != null) {
                         if (lockInstant == null && !fileLock.isRetryDue()) {
                             // not held: try again only after the retry period
                             continue;
                         }
-                        if (now - (lockTime + fileLock.getRenewDeadline().toMillis()) > 0) {
-                            try {
-                                if (LOG.isDebugEnabled()) {
-                                    LOG.debug("Try to renew file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "].");
-                                }
-                                fileLock.renew();
-                            } catch (FileLockException e) {
-                                if (LOG.isDebugEnabled()) {
-                                    LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], could not be renewed: " + e.getMessage());
-                                }
-                            }
+                        // A held lock is renewed in place one check interval before half the renew deadline, so that the gap between two
+                        // renewals stays well below the renew deadline (the lead is fenced on it). Measured with the monotonic clock: a
+                        // step of the wall clock must neither stop nor force the renewals.
+                        long renewAfterNanos = Math.max(0L, renewDeadline.toNanos() / 2 - TimeUnit.SECONDS.toNanos(scheduleInterval));
+                        if (lockInstant == null || fileLock.getLockAgeNanos() > renewAfterNanos) {
+                            renewAsync(fileLock);
                         }
-                    } else if (fileLock.getLockPeriod() != null && (now - (lockTime + fileLock.getLockPeriod().toMillis()) > 0)
-                            || !ThreadUtil.getInstance().isThreadAlive(fileLock.getThreadId())) /* || !fileLock.hasLock() ) */ {
+                    } else if (lockPeriod != null && (now - (lockTime + lockPeriod.toMillis()) > 0)
+                            || !fileLock.isOwnerThreadAlive()) {
                         if (fileLock.hasLock()) {
                             if (LOG.isDebugEnabled()) {
                                 LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], timeout.");
@@ -232,66 +267,92 @@ public final class FileLockFactory {
                         // do nothing 
                     }
                 }
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                // also an Error: the handler must keep running, otherwise no lock is renewed or tried again anymore
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Unexpected exception: " + e.getMessage(), e);
                 }
-                LOG.info("Unexpected exception during file lock check: {}, no action required, will retry on next check.", e.getMessage());
+                LOG.info("Unexpected exception during file lock check: {}, no action required, will retry on next check.", e.toString());
             }
         }
     }
 
     
     /**
-     * Start the schedule
+     * Renew or acquire a lock on its own task of the shared executors: a lock on a slow or stalled (network) file system must
+     * not delay the renewals of the other locks. A lock whose previous renewal still runs is skipped.
+     *
+     * @param fileLock the lock
      */
-    private void startSchedule() {
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("Start scheduler with interval of " + scheduleInterval + " seconds.");
-        }
-        // Daemon thread: a non-daemon scheduler thread would keep the JVM alive after main() returns,
-        // and the shutdown hook that stops it only runs once the JVM has started to exit.
-        scheduledExecuterService = Executors.newScheduledThreadPool(1, runnable -> {
-            Thread thread = new Thread(runnable, "leader-election-file-lock");
-            thread.setDaemon(true);
-            return thread;
-        });
-        scheduledFuture = scheduledExecuterService.scheduleAtFixedRate(new FileLockHandler(), 0, scheduleInterval, TimeUnit.SECONDS);
-    }
-
-    
-    /**
-     * Stop the schdule
-     */
-    private void shutdownSchedule() {
-        if (scheduledFuture != null) {
-            try {
-                scheduledFuture.cancel(true);
-            } catch (Exception e) {
-                // NOP
+    private void renewAsync(FileLock fileLock) {
+        Future<?> running = runningRenewals.get(fileLock);
+        if (running != null && !running.isDone()) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("The previous renewal of file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "] still runs.");
             }
-            scheduledFuture = null;
+            return;
         }
-
-        if (scheduledExecuterService != null) {
-            try {
-                scheduledExecuterService.shutdown();
-                
+        try {
+            runningRenewals.put(fileLock, LeaderElectionExecutors.getInstance().submit(RENEW_THREAD_NAME, () -> {
                 try {
-                    scheduledExecuterService.awaitTermination(scheduleInterval, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    // Restore the interrupt flag so the calling thread (e.g. setScheduleInterval()
-                    // or the JVM shutdown hook) can observe that it was interrupted (RES-1).
-                    Thread.currentThread().interrupt();
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Try to renew file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "].");
+                    }
+                    fileLock.renew();
+                } catch (FileLockException e) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("Losed file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "], could not be renewed: " + e.getMessage());
+                    }
                 }
-            } catch (Exception e) {
-                // NOP
+                return null;
+            }));
+        } catch (RejectedExecutionException e) {
+            // the executors shut down: the JVM is exiting
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Could not renew file lock [" + fileLock.getId() + LOG_SEP + fileLock.getFile() + "]: " + e.getMessage());
             }
-            scheduledExecuterService = null;
         }
-        
+    }
+
+
+    /**
+     * Schedule the lock handler if it does not run yet.
+     */
+    private synchronized void scheduleIfNeeded() {
+        if (handlerTask == null && !shutdown && !fileLockMap.isEmpty()) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Start the file lock handler with an interval of " + scheduleInterval + " seconds.");
+            }
+            handlerTask = LeaderElectionExecutors.getInstance().schedulePeriodic(HANDLER_THREAD_NAME, new FileLockHandler(), scheduleInterval * 1000L);
+        }
+    }
+
+
+    /**
+     * Stop the lock handler once no file lock exists anymore.
+     */
+    private synchronized void cancelScheduleIfIdle() {
+        if (handlerTask != null && fileLockMap.isEmpty()) {
+            handlerTask.cancel();
+            handlerTask = null;
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Stopped the file lock handler.");
+            }
+        }
+    }
+
+
+    /**
+     * Stop the lock handler for good: the JVM is exiting.
+     */
+    private synchronized void shutdownSchedule() {
+        shutdown = true;
+        if (handlerTask != null) {
+            handlerTask.cancel();
+            handlerTask = null;
+        }
         if (LOG.isDebugEnabled()) {
-            LOG.debug("Stopped the scheduler.");
+            LOG.debug("Stopped the file lock handler.");
         }
     }
 }

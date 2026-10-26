@@ -5,6 +5,7 @@
  */
 package com.github.toolarium.leader.election.impl;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -35,7 +36,17 @@ public class CloseStateTest {
          * Constructor for StubElector
          */
         StubElector() {
-            super(new LeaderElectionInformation("close-state-" + System.nanoTime()), new LeaderElectionConfiguration());
+            this(new LeaderElectionConfiguration());
+        }
+
+
+        /**
+         * Constructor for StubElector
+         *
+         * @param configuration the configuration
+         */
+        StubElector(LeaderElectionConfiguration configuration) {
+            super(new LeaderElectionInformation("close-state-" + System.nanoTime()), configuration);
         }
 
 
@@ -147,5 +158,30 @@ public class CloseStateTest {
         assertTrue(closeMillis.get() >= 0 && closeMillis.get() < 2000, "close() from within a task waited " + closeMillis.get() + "ms");
         assertTrue(electError.get() instanceof LeaderElectionException, "elect() from within a task of a closed elector must fail fast");
         assertFalse(elector.isLeader());
+    }
+
+
+    /**
+     * A confirmation that comes after the lead was not confirmed within the renew deadline starts a new term, although no
+     * loss was reported: the lead lapsed in between, so leases of the old term stay invalid. A timely confirmation keeps it.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testLapsedLeadStartsNewTerm() throws Exception {
+        StubElector elector = new StubElector(new LeaderElectionConfiguration(Duration.ofMillis(1500), Duration.ofMillis(1000), Duration.ofMillis(500)));
+        try {
+            assertTrue(elector.elect(Duration.ofSeconds(1)));
+            long term = elector.getLeadershipTerm();
+
+            elector.callback(true);
+            assertEquals(term, elector.getLeadershipTerm(), "A timely confirmation keeps the term");
+
+            Thread.sleep(1300);
+            elector.callback(true);
+            assertEquals(term + 1, elector.getLeadershipTerm(), "A confirmation after a lapsed lead starts a new term");
+        } finally {
+            elector.close();
+        }
     }
 }

@@ -42,6 +42,42 @@ public class LeaderElectionExecutorsTest {
 
 
     /**
+     * A run that was skipped because the previous run took longer than the period follows right after that run, not at the
+     * next period.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testMissedRunFollowsAnOverrun() throws Exception {
+        List<Long> starts = java.util.Collections.synchronizedList(new ArrayList<>());
+        AtomicInteger runs = new AtomicInteger();
+        LeaderElectionExecutors.PeriodicTask task = LeaderElectionExecutors.getInstance().schedulePeriodic("test-missed-run", () -> {
+            starts.add(System.nanoTime());
+            if (runs.incrementAndGet() == 1) {
+                // the first run takes longer than two periods: the due runs are skipped
+                try {
+                    Thread.sleep(700);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }, 300);
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (starts.size() < 2 && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertTrue(starts.size() >= 2, "A second run must follow");
+            long gapMillis = TimeUnit.NANOSECONDS.toMillis(starts.get(1) - starts.get(0));
+            // right after the 700 ms run, not at the next 300 ms slot (which could be up to 900 ms after the start)
+            assertTrue(gapMillis < 820, "The missed run must follow right after the overrun, gap " + gapMillis + " ms");
+        } finally {
+            task.cancel();
+        }
+    }
+
+
+    /**
      * Runs of one periodic task never overlap; a run that is due while the previous one is active is skipped.
      *
      * @throws Exception in case of an error

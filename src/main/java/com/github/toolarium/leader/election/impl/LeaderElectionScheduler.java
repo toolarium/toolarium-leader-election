@@ -10,6 +10,7 @@ import com.github.toolarium.leader.election.ILeaderElectorView;
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import com.github.toolarium.leader.election.impl.database.DatabaseLeaderElectorImpl;
+import com.github.toolarium.leader.election.impl.dto.LeaderElectorSnapshot;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -137,8 +138,9 @@ public final class LeaderElectionScheduler {
                     }
                 }
             } else if (elector.isLeader() && elector instanceof ILeaderElectorView) {
-                // FILE / NETWORK / KUBERNETES: use the local elector's known state.
-                result.add((ILeaderElectorView) elector);
+                // FILE / NETWORK / KUBERNETES: a snapshot of the local elector's state, never the elector itself, which could be
+                // cast back to control it.
+                result.add(new LeaderElectorSnapshot((ILeaderElectorView) elector));
             }
         }
 
@@ -189,10 +191,15 @@ public final class LeaderElectionScheduler {
                 return true;
             }
         }
-        // For DATABASE strategy: attempt to delete the remote leader's DB row.
+        // For DATABASE strategy: attempt to delete the remote leader's DB row, once per DataSource and table.
+        Map<DataSource, Set<String>> triedTables = new IdentityHashMap<>();
         for (ILeaderElector elector : snapshot) {
             if (elector instanceof DatabaseLeaderElectorImpl) {
-                if (((DatabaseLeaderElectorImpl) elector).forceReleaseRemote(id)) {
+                DatabaseLeaderElectorImpl dbElector = (DatabaseLeaderElectorImpl) elector;
+                if (isTableAlreadyQueried(dbElector, triedTables)) {
+                    continue;
+                }
+                if (dbElector.forceReleaseRemote(id)) {
                     return true;
                 }
             }

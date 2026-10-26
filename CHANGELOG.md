@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **DATABASE**: `setAllowDdl(false)` disables automatic table creation and migration; existing tables are migrated automatically otherwise.
 - **NETWORK**: `minimumMembers()` sets a quorum, so the minority side of a network partition has no leader.
-- **NETWORK**: `encryptionKey()` encrypts the cluster messages with a shared key; `configuration()` sets a custom JGroups configuration. Without either, an info message is logged.
+- **NETWORK**: `encryptionKey()` encrypts the cluster messages with a shared AES key (128 to 256 bits); `configuration()` sets a custom JGroups configuration. Without either, an info message is logged.
 - **KUBERNETES**: `lockType()` selects the lock; the default is a Lease, `ENDPOINTS` keeps the lock of 1.2.x for a rolling upgrade.
 
 ### Changed
@@ -29,14 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ALL**: a closed elector never reports the lead, `elect()` and `close()` no longer block or leak threads, locks or tasks, and an elector can be elected again after `close()`.
 - **ALL**: leader tasks are interrupted reliably when the lead is lost, leases of an earlier term are invalid, and a named task never runs twice at the same time.
 - **ALL**: the shutdown hook also closes electors that were elected again after `close()`.
+- **ALL**: the administration views are read-only snapshots.
 - **DATABASE**: a healthy leader keeps the lead with the default timings, lease expiry no longer depends on the JVM time zone, and a slow or unreachable database no longer blocks `elect()` or keeps a node leading.
 - **DATABASE**: `forceRelease()` hands the lead to another node without overlap.
-- **DATABASE**: works with non-auto-commit data sources and inside JTA transactions; `tryExtend()` returns `false` instead of throwing or waiting.
+- **DATABASE**: schema-qualified table names and table names with `_` work on all databases.
+- **DATABASE**: a leader row with a time far in the future (e.g. a wrong clock) no longer blocks the election; a warning names the instance.
+- **DATABASE**: a clock step on a node (NTP, a resumed VM) no longer shifts its lease times.
+- **DATABASE**: works with non-auto-commit data sources and inside JTA transactions; `tryExtend()` returns `false` instead of throwing or waiting, and does not write to the database while the lease is fresh.
 - **DATABASE**: the administration view lists every leader once with its own election name.
 - **FILE**: long-running tasks are no longer interrupted by the lock renewal, the JVM can exit, and different names no longer share a lock file.
 - **FILE**: a lock held by another process is tried again once per retry period instead of every second.
-- **KUBERNETES**: `elect()` returns on a follower, the lock is released on `close()`, `close()` respects the close timeout, and the node keeps competing after an unexpected error.
+- **KUBERNETES**: `elect()` returns on a follower and while the API server is unreachable, the lock is released on `close()`, `close()` respects the close timeout, and the node keeps competing after an unexpected error.
 - **NETWORK**: joining no longer fails on Windows hosts with reserved port ranges, `elect()` respects its timeout, and a node with an outdated cluster view no longer keeps the lead.
+- **NETWORK**: with an encryption key, all messages including their headers are encrypted; the lead is confirmed by answers to fresh challenges, so a paused or replayed node cannot keep it.
 
 
 ## [ 1.2.1 ] - 2026-10-22

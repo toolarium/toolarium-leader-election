@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Assumptions;
@@ -35,6 +36,9 @@ import org.junit.jupiter.api.Test;
  * @author patrick
  */
 public class FileLockSafetyTest {
+    private static final String BUILD_DIR = "build";
+    private static final String LOCK_SUFFIX = ".lock";
+
 
     /**
      * renew() of a held lock must keep the OS lock and must not fire releaseLock().
@@ -43,7 +47,7 @@ public class FileLockSafetyTest {
      */
     @Test
     public void testRenewKeepsHeldLockWithoutReleaseCallback() throws Exception {
-        File file = Paths.get("build", "testRenewInPlace-" + System.nanoTime() + ".lock").toFile();
+        File file = Paths.get(BUILD_DIR, "testRenewInPlace-" + System.nanoTime() + LOCK_SUFFIX).toFile();
         FileLock fileLock = new FileLock(file, null, Duration.ofSeconds(1));
         AtomicInteger hasLockCount = new AtomicInteger();
         AtomicInteger releaseCount = new AtomicInteger();
@@ -89,7 +93,7 @@ public class FileLockSafetyTest {
      */
     @Test
     public void testLockFileIsNeitherTruncatedNorDeleted() throws Exception {
-        Path path = Paths.get("build", "testKeepLockFile-" + System.nanoTime() + ".lock");
+        Path path = Paths.get(BUILD_DIR, "testKeepLockFile-" + System.nanoTime() + LOCK_SUFFIX);
         Files.write(path, "keep".getBytes(StandardCharsets.UTF_8));
 
         FileLock fileLock = new FileLock(path.toFile());
@@ -110,8 +114,8 @@ public class FileLockSafetyTest {
      */
     @Test
     public void testSymbolicLinkIsRefused() throws Exception {
-        Path target = Paths.get("build", "testSymlinkTarget-" + System.nanoTime() + ".txt").toAbsolutePath();
-        Path link = Paths.get("build", "testSymlink-" + System.nanoTime() + ".lock").toAbsolutePath();
+        Path target = Paths.get(BUILD_DIR, "testSymlinkTarget-" + System.nanoTime() + ".txt").toAbsolutePath();
+        Path link = Paths.get(BUILD_DIR, "testSymlink-" + System.nanoTime() + LOCK_SUFFIX).toAbsolutePath();
         Files.write(target, "victim".getBytes(StandardCharsets.UTF_8));
         try {
             try {
@@ -132,19 +136,236 @@ public class FileLockSafetyTest {
 
 
     /**
-     * The FileLockFactory scheduler thread must be a daemon so it does not keep the JVM alive.
+     * The lead ends when the lock is not renewed within the renew deadline (e.g. a lock handler hanging on a stalled network
+     * file system), and counts again once the renewals resume.
+     *
+     * @throws Exception in case of an error
      */
     @Test
-    public void testFileLockFactorySchedulerIsDaemon() {
-        FileLockFactory.getInstance();
-        boolean found = false;
-        for (Thread thread : Thread.getAllStackTraces().keySet()) {
-            if ("leader-election-file-lock".equals(thread.getName())) {
-                found = true;
-                assertTrue(thread.isDaemon(), "FileLockFactory scheduler thread must be a daemon thread");
+    public void testLeadIsFencedWithoutRenewals() throws Exception {
+        LeaderElectionConfiguration config = new LeaderElectionConfiguration(Duration.ofSeconds(3), Duration.ofSeconds(2), Duration.ofSeconds(1));
+        ILeaderElector elector = LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.FILE,
+                new LeaderElectionInformation("file-fenced-" + System.nanoTime()), config);
+        try {
+            assertTrue(elector.elect(Duration.ofSeconds(5)));
+            // no renewals for a minute
+            FileLockFactory.getInstance().setScheduleInterval(60);
+            Thread.sleep(2500);
+            assertFalse(elector.isLeader(), "Without renewals the lead must end after the renew deadline");
+
+            FileLockFactory.getInstance().setScheduleInterval(1);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!elector.isLeader() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
             }
+            assertTrue(elector.isLeader(), "The lead must count again once the lock is renewed");
+        } finally {
+            FileLockFactory.getInstance().setScheduleInterval(1);
+            elector.close();
         }
-        assertTrue(found, "FileLockFactory scheduler thread not found");
+    }
+
+
+    /**
+     * close() does not hang behind a lock operation that hangs (e.g. on a stalled network file system): it returns, and the
+     * lock is released once the operation has ended.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testCloseDoesNotHangBehindHangingOperation() throws Exception {
+        Path path = Paths.get(BUILD_DIR, "testHangingClose-" + System.nanoTime() + LOCK_SUFFIX).toAbsolutePath();
+        FileLock fileLock = new FileLock(path.toFile(), Duration.ofSeconds(10), Duration.ofSeconds(5));
+        FileLock other = new FileLock(path.toFile(), Duration.ofSeconds(10), Duration.ofSeconds(5));
+        java.util.concurrent.CountDownLatch inOperation = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch endOperation = new java.util.concurrent.CountDownLatch(1);
+        AtomicBoolean hang = new AtomicBoolean(false);
+        Thread renewThread = null;
+        try {
+            fileLock.lock();
+            fileLock.setFileLockListener(new IFileLockListener() {
+                /**
+                 * @see com.github.toolarium.leader.election.impl.file.IFileLockListener#hasLock()
+                 */
+                @Override
+                public void hasLock() {
+                    if (!hang.get()) {
+                        return;
+                    }
+                    // the renewal hangs while it holds the state of the lock
+                    inOperation.countDown();
+                    try {
+                        endOperation.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+
+                /**
+                 * @see com.github.toolarium.leader.election.impl.file.IFileLockListener#releaseLock()
+                 */
+                @Override
+                public void releaseLock() {
+                    // NOP
+                }
+            });
+            hang.set(true);
+            renewThread = new Thread(() -> {
+                try {
+                    fileLock.renew();
+                } catch (FileLockException e) {
+                    // NOP
+                }
+            }, "test-hanging-renew");
+            renewThread.start();
+            assertTrue(inOperation.await(10, TimeUnit.SECONDS));
+
+            long start = System.nanoTime();
+            fileLock.close();
+            long closeMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(closeMillis < 8000, "close() must not hang behind the operation, took " + closeMillis + " ms");
+            assertThrows(FileLockException.class, other::lock, "The lock is still held while the operation hangs");
+
+            endOperation.countDown();
+            renewThread.join(5000);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            boolean locked = false;
+            while (!locked && System.nanoTime() < deadline) {
+                try {
+                    other.lock();
+                    locked = true;
+                } catch (FileLockException e) {
+                    Thread.sleep(50);
+                }
+            }
+            assertTrue(locked, "The lock must be released once the operation has ended");
+        } finally {
+            endOperation.countDown();
+            other.close();
+            fileLock.close();
+            Files.deleteIfExists(path);
+        }
+    }
+
+
+    /**
+     * A lock whose renewal hangs (e.g. on a stalled network file system) does not stop the renewals of the other locks.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testHangingRenewalDoesNotBlockOtherLocks() throws Exception {
+        FileLockFactory factory = FileLockFactory.getInstance();
+        FileLock hanging = factory.tryLock(Paths.get(BUILD_DIR, "testHangingRenew-" + System.nanoTime() + LOCK_SUFFIX).toFile(), Duration.ofSeconds(3), Duration.ofSeconds(2));
+        FileLock healthy = factory.tryLock(Paths.get(BUILD_DIR, "testHealthyRenew-" + System.nanoTime() + LOCK_SUFFIX).toFile(), Duration.ofSeconds(3), Duration.ofSeconds(2));
+        java.util.concurrent.CountDownLatch endHang = new java.util.concurrent.CountDownLatch(1);
+        try {
+            assertTrue(hanging.hasLock() && healthy.hasLock());
+            hanging.setFileLockListener(new IFileLockListener() {
+                /**
+                 * @see com.github.toolarium.leader.election.impl.file.IFileLockListener#hasLock()
+                 */
+                @Override
+                public void hasLock() {
+                    // every renewal of this lock hangs
+                    try {
+                        endHang.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+
+                /**
+                 * @see com.github.toolarium.leader.election.impl.file.IFileLockListener#releaseLock()
+                 */
+                @Override
+                public void releaseLock() {
+                    // NOP
+                }
+            });
+
+            // during 4 s the healthy lock is renewed again and again (about every second) while the other one hangs
+            long maxAgeNanos = 0;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+            while (System.nanoTime() < deadline) {
+                maxAgeNanos = Math.max(maxAgeNanos, healthy.getLockAgeNanos());
+                Thread.sleep(50);
+            }
+            assertTrue(maxAgeNanos < TimeUnit.SECONDS.toNanos(2), "The healthy lock must be renewed within its renew deadline, age was "
+                       + TimeUnit.NANOSECONDS.toMillis(maxAgeNanos) + " ms");
+        } finally {
+            endHang.countDown();
+            factory.release(healthy);
+            factory.release(hanging);
+        }
+    }
+
+
+    /**
+     * The lock handler of the FileLockFactory runs only while file locks exist.
+     */
+    @Test
+    public void testFileLockHandlerRunsOnlyWithLocks() {
+        FileLockFactory factory = FileLockFactory.getInstance();
+        FileLock fileLock = factory.tryLock(Paths.get(BUILD_DIR, "testHandler-" + System.nanoTime() + LOCK_SUFFIX).toFile(), Duration.ofSeconds(10), Duration.ofSeconds(5));
+        try {
+            assertTrue(factory.isScheduled(), "The lock handler must run while a file lock exists");
+        } finally {
+            factory.release(fileLock);
+        }
+        if (factory.getLockCount() == 0) {
+            assertFalse(factory.isScheduled(), "The lock handler must stop once no file lock exists anymore");
+        }
+    }
+
+
+    /**
+     * A lock file that is deleted while it is locked is detected on the next renewal: the lock is acquired again on the new
+     * file, so no other process can lock a new file under the same name while this one still believes to hold the lock.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testDeletedLockFileIsDetected() throws Exception {
+        Path path = Paths.get(BUILD_DIR, "testDeleted-" + System.nanoTime() + LOCK_SUFFIX).toAbsolutePath();
+        AtomicInteger released = new AtomicInteger();
+        FileLock fileLock = new FileLock(path.toFile(), Duration.ofSeconds(10), Duration.ofSeconds(5));
+        FileLock other = new FileLock(path.toFile(), Duration.ofSeconds(10), Duration.ofSeconds(5));
+        try {
+            fileLock.lock();
+            fileLock.setFileLockListener(new IFileLockListener() {
+                /**
+                 * @see com.github.toolarium.leader.election.impl.file.IFileLockListener#hasLock()
+                 */
+                @Override
+                public void hasLock() {
+                    // NOP
+                }
+
+                /**
+                 * @see com.github.toolarium.leader.election.impl.file.IFileLockListener#releaseLock()
+                 */
+                @Override
+                public void releaseLock() {
+                    released.incrementAndGet();
+                }
+            });
+            try {
+                Files.delete(path);
+            } catch (Exception e) {
+                Assumptions.assumeTrue(false, "A locked file cannot be deleted here: " + e.getMessage());
+            }
+
+            fileLock.renew();
+            assertTrue(released.get() > 0, "The lock on the deleted file must be given up");
+            assertTrue(fileLock.hasLock(), "The lock must be acquired again on the new file");
+            assertTrue(Files.exists(path), "The lock file must exist again");
+            assertThrows(FileLockException.class, other::lock, "The new lock file must be locked by the first lock");
+        } finally {
+            other.close();
+            fileLock.close();
+            Files.deleteIfExists(path);
+        }
     }
 
 

@@ -94,6 +94,32 @@ public class KubernetesRecoveryTest {
 
 
     /**
+     * elect() without a timeout returns "not leader" after the lease duration while the lock cannot be read (API server not
+     * reachable or access denied); the node leads once the lock can be read again.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testElectReturnsWhileApiIsUnreachable() throws Exception {
+        ControllableLock lock = new ControllableLock("unreachable-node");
+        lock.failingReads.set(Integer.MAX_VALUE);
+        KubernetesLeaderElectorImpl elector = createElector(lock, "k8s-recovery-unreachable", new LeaderElectionConfiguration(Duration.ofSeconds(3), Duration.ofSeconds(2), Duration.ofMillis(500)));
+        try {
+            long start = System.nanoTime();
+            assertFalse(elector.elect(), "elect() must return 'not leader' while the lock cannot be read");
+            long durationMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(durationMillis < 6000, "elect() must return after the lease duration, took " + durationMillis + " ms");
+
+            lock.failingReads.set(0);
+            assertTrue(await(elector::isLeader, 10000), "The node must lead once the lock can be read");
+        } finally {
+            lock.failingReads.set(0);
+            elector.close();
+        }
+    }
+
+
+    /**
      * close() releases the lock of the leader: the record keeps no holder.
      *
      * @throws Exception in case of an error

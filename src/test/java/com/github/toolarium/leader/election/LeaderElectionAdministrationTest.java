@@ -5,6 +5,7 @@
  */
 package com.github.toolarium.leader.election;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -14,6 +15,7 @@ import com.github.toolarium.leader.election.dto.LeaderElectionInformation;
 import com.github.toolarium.leader.election.dto.LeaderElectionStrategy;
 import com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
+import com.github.toolarium.leader.election.impl.dto.LeaderElectionConfigurationSnapshot;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.time.Duration;
@@ -89,6 +91,19 @@ public class LeaderElectionAdministrationTest {
             Collection<ILeaderElectorView> views = admin.getElectors();
             assertTrue(containsId(views, elector.getId()),
                     "Active local leader must appear in getElectors(), id=" + elector.getId());
+
+            // the view is a snapshot: it cannot be cast back to the elector to control it, and its configuration holds only the timings
+            for (ILeaderElectorView view : views) {
+                assertFalse(view instanceof ILeaderElector, "A view must not expose the elector");
+                assertTrue(view.getLeaderElectionConfiguration() instanceof LeaderElectionConfigurationSnapshot,
+                           "A view must not expose the configuration of the elector: " + view.getLeaderElectionConfiguration().getClass());
+                if (elector.getId().equals(view.getId())) {
+                    assertEquals("admin-local-test", view.getLeaderElectionInformation().getName());
+                    assertNotNull(view.getLeaderElectorTimestamp());
+                    assertTrue(view.getRemainingLeadTime().compareTo(Duration.ZERO) > 0);
+                    assertEquals(((ILeaderElectorView) elector).getLeaderElectionConfiguration().getRenewDeadline(), view.getLeaderElectionConfiguration().getRenewDeadline());
+                }
+            }
         } finally {
             elector.close();
         }

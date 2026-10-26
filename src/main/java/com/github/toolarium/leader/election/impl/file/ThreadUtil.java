@@ -39,10 +39,7 @@ public final class ThreadUtil {
 
 
     /**
-     * Returns the id of the current thread.
-     * Uses the deprecated {@link Thread#getId()} for Java 8 compatibility; once the minimum
-     * runtime is raised to Java 19, replace with {@code Thread.currentThread().threadId()} and
-     * add {@code @SuppressWarnings("deprecation")} to suppress the deprecation warning.
+     * Returns the id of the current thread, see {@link #getThreadId(Thread)}.
      *
      * @return the current thread id
      */
@@ -53,9 +50,9 @@ public final class ThreadUtil {
 
     /**
      * Returns the id of thread.
-     * Uses the deprecated {@link Thread#getId()} for Java 8 compatibility; once the minimum
-     * runtime is raised to Java 19, replace with {@code Thread.currentThread().threadId()} and
-     * add {@code @SuppressWarnings("deprecation")} to suppress the deprecation warning.
+     * Uses {@link Thread#getId()}, deprecated since Java 19, for compatibility with older runtimes; the deprecation
+     * warning is suppressed. Once the minimum runtime is Java 19, replace it with {@code thread.threadId()} and remove
+     * the suppression.
      * 
      * @param thread the cthread
      * @return the current thread id

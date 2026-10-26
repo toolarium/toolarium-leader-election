@@ -16,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.github.toolarium.leader.election.exception.LeaderElectionException;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -138,6 +139,44 @@ public class DatabaseTryExtendTest {
             elector.close();
             assertFalse(leaseRef.get().tryExtend(), "A lease of a closed elector must not be extended");
         } finally {
+            closeQuietly(elector);
+        }
+    }
+
+
+    /**
+     * tryExtend() right after a renewal does not write to the database: an application that extends per processed item
+     * causes no database write per item. Without the interval every extension reaches the database.
+     *
+     * @throws Exception in case of an error
+     */
+    @Test
+    public void testFreshLeaseIsNotWrittenAgain() throws Exception {
+        FaultInjectingDataSource ds = new FaultInjectingDataSource("tryExtendFresh");
+        DatabaseLeaderElectorImpl elector = createElector(ds, "try-extend-fresh", TIMEOUT, RENEW_DEADLINE, RETRY_PERIOD);
+        AtomicInteger extendRequests = new AtomicInteger();
+        try {
+            assertTrue(elector.elect(Duration.ofSeconds(10)));
+            // counts the connection requests of extensions without failing them
+            ds.failConnections(name -> name.startsWith(FaultInjectingDataSource.EXTEND_THREAD_PREFIX) && extendRequests.incrementAndGet() < 0, 0);
+
+            elector.setExtensionInterval(Duration.ofSeconds(60));
+            AtomicInteger extended = new AtomicInteger();
+            assertTrue(elector.runIfLeader("try-extend-fresh-task", lease -> {
+                for (int i = 0; i < 100; i++) {
+                    if (lease.tryExtend()) {
+                        extended.incrementAndGet();
+                    }
+                }
+            }));
+            assertEquals(100, extended.get(), "Every extension of a fresh lease must succeed");
+            assertEquals(0, extendRequests.get(), "A fresh lease must not be written again");
+
+            elector.setExtensionInterval(Duration.ZERO);
+            assertTrue(elector.runIfLeader("try-extend-written-task", lease -> assertTrue(lease.tryExtend())));
+            assertTrue(extendRequests.get() > 0, "Without the interval the extension must reach the database");
+        } finally {
+            ds.reset();
             closeQuietly(elector);
         }
     }
