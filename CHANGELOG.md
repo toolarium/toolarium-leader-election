@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [ 1.3.1 ] - 2026-10-26
 
 ## [ 1.3.0 ] - 2026-10-24
 ### Added
@@ -42,7 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **KUBERNETES**: `elect()` returns on a follower and while the API server is unreachable, the lock is released on `close()`, `close()` respects the close timeout, and the node keeps competing after an unexpected error.
 - **NETWORK**: joining no longer fails on Windows hosts with reserved port ranges, `elect()` respects its timeout, and a node with an outdated cluster view no longer keeps the lead.
 - **NETWORK**: with an encryption key, all messages including their headers are encrypted; the lead is confirmed by answers to fresh challenges, so a paused or replayed node cannot keep it.
-
 
 ## [ 1.2.1 ] - 2026-10-22
 ### Added
