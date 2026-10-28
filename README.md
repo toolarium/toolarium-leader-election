@@ -195,6 +195,9 @@ Both `elect()` variants throw `InterruptedException` if the calling thread is in
 `runIfLeader` executes work on the calling thread only when this node holds leadership. If leadership is lost while the task runs, the task thread is interrupted automatically.
 
 ```java
+// elect() must be called first; runIfLeader does not wait for an election
+elector.elect();
+
 // Simple Runnable; no lease needed
 elector.runIfLeader("do-work", () -> {
     processQueue();
