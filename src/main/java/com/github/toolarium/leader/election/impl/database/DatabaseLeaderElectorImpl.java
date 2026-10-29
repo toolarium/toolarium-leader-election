@@ -158,6 +158,15 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
 
 
     /**
+     * @see com.github.toolarium.leader.election.impl.AbstractLeaderElectorImpl#getId()
+     */
+    @Override
+    public String getId() {
+        return getLeaderElectionInformation().getIdentity();
+    }
+
+
+    /**
      * Initialise the database schema (CREATE TABLE, migrations). Idempotent: subsequent calls
      * before {@link #close()} are no-ops. Called automatically by the factory at build time so
      * schema errors surface immediately rather than on the first {@link #elect()} call.
@@ -466,7 +475,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             return false;
         }
         String uniqueName = getLeaderElectionInformation().getElectionGroupName();
-        String instanceId = getId();
+        String instanceId = getLeaderElectionInformation().getIdentity();
         try {
             long extendStartNanos = System.nanoTime();
             long dbNow = getDbNow();
@@ -633,7 +642,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 // does leader work. The row is deleted once the tasks ended, unless the elector was elected again meanwhile.
                 final int closedSession = sessionCounter.get();
                 final String groupName = getLeaderElectionInformation().getElectionGroupName();
-                final String instanceId = getId();
+                final String instanceId = getLeaderElectionInformation().getIdentity();
                 releaseWhenTasksFinished(false, "leader-election-db-release-" + getLeaderElectionInformation().getName(), () -> {
                     if (closedSession != sessionCounter.get() || isInitialized()) {
                         return;
@@ -649,7 +658,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
                 // The row is only deleted while it still holds the record written last by this session: a delete that is late
                 // (e.g. waiting for a connection) cannot remove a row the elector wrote after it was elected again.
                 final String groupName = getLeaderElectionInformation().getElectionGroupName();
-                final String instanceId = getId();
+                final String instanceId = getLeaderElectionInformation().getIdentity();
                 Thread deleteThread = new Thread(() -> {
                     try {
                         deleteOwnRecord(groupName, instanceId, getWrittenRecordIds());
@@ -1282,7 +1291,7 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
             }
 
             String uniqueName = getLeaderElectionInformation().getElectionGroupName();
-            String instanceId = getId();
+            String instanceId = getLeaderElectionInformation().getIdentity();
 
             // Pre-tick renew-deadline guard: checked BEFORE any DB call via checkPreTickRenewDeadline().
             // super.isLeader() (stored flag) is used there, not the overridden isLeader(), so the
@@ -1481,8 +1490,8 @@ public class DatabaseLeaderElectorImpl extends AbstractLeaderElectorImpl<Databas
          */
         @Override
         public String getId() {
-            // The instance column stores the stable elector UUID (== AbstractLeaderElectorImpl.getId()
-            // on the owning node), making this id consistent for both local and remote views.
+            // The instance column stores the elector's identity (from LeaderElectionInformation.getIdentity()),
+            // making this id consistent for both local and remote views.
             return record.getInstance();
         }
 

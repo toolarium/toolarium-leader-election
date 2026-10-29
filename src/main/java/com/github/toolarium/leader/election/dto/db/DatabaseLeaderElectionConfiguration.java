@@ -30,6 +30,8 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
     // volatile: set when the elector is built, read by the election and the administration threads
     private volatile DataSource dataSource;
     private volatile LeaderElectionDatabaseStructure leaderElectionDatabaseStructure;
+    // Table name override: applied to the auto-detected or caller-supplied structure.
+    private volatile String tableName;
     // When false, elect() fails fast with a clear error instead of executing CREATE TABLE or
     // ALTER TABLE at startup. Set to false for environments where the application user has no
     // DDL rights or when the table is managed by an external migration tool (Flyway, Liquibase).
@@ -110,6 +112,32 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
      */
     public DatabaseLeaderElectionConfiguration setLeaderElectionDatabaseStructure(LeaderElectionDatabaseStructure leaderElectionDatabaseStructure) {
         this.leaderElectionDatabaseStructure = leaderElectionDatabaseStructure;
+        return this;
+    }
+
+
+    /**
+     * Get the table name override. When set, this name is applied to the auto-detected or
+     * caller-supplied database structure, so a custom table name can be used without having
+     * to create and configure the structure manually.
+     *
+     * @return the table name override, or {@code null} if not set (uses the structure's default)
+     */
+    public String getTableName() {
+        return tableName;
+    }
+
+
+    /**
+     * Set the table name. This name is applied to the auto-detected or caller-supplied
+     * database structure at initialization time, so the database dialect is still detected
+     * automatically.
+     *
+     * @param tableName the table name
+     * @return this configuration instance for method chaining
+     */
+    public DatabaseLeaderElectionConfiguration setTableName(String tableName) {
+        this.tableName = tableName;
         return this;
     }
 
@@ -197,6 +225,8 @@ public class DatabaseLeaderElectionConfiguration extends LeaderElectionConfigura
          * Only letters, digits, underscore, dollar sign, and dot (for schema qualification) are permitted.
          * Quotes, semicolons, spaces, and other SQL-special characters are rejected to prevent
          * SQL injection via the table name in all generated DDL and DML statements.
+         * Subclasses enforce a database-specific maximum length via
+         * {@link JDBCLeaderElectionDatabaseStructure#getMaxTableNameLength()}.
          *
          * @param tableName the table name
          * @throws IllegalArgumentException if the table name is null, blank, or contains invalid characters

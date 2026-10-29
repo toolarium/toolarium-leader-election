@@ -11,6 +11,7 @@ import com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStr
 import com.github.toolarium.leader.election.dto.db.MariaDBLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.MySQLLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.OracleLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.PostgreSQLLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.SQLServerLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.impl.LogText;
 import java.sql.Connection;
@@ -52,6 +53,7 @@ public class LeaderElectionDAO {
     public LeaderElectionDAO(DatabaseLeaderElectionConfiguration leaderElectionConfiguration) {
         this.leaderElectionConfiguration = leaderElectionConfiguration;
         this.leaderElectionDatabaseStructure = leaderElectionConfiguration.getLeaderElectionDatabaseStructure();
+        applyTableNameOverride(this.leaderElectionDatabaseStructure);
         // Derive the per-statement JDBC query timeout from renewDeadline so the whole tick
         // (up to 3 sequential statements) fits within the renew deadline.  Using retryPeriod alone
         // would allow 3 * retryPeriod per tick, which can exceed renewDeadline and create a
@@ -163,6 +165,7 @@ public class LeaderElectionDAO {
             if (leaderElectionDatabaseStructure == null) {
                 String productName = conn.getMetaData().getDatabaseProductName();
                 leaderElectionDatabaseStructure = detectDatabaseStructure(productName);
+                applyTableNameOverride(leaderElectionDatabaseStructure);
                 leaderElectionConfiguration.setLeaderElectionDatabaseStructure(leaderElectionDatabaseStructure);
                 LOG.info("Auto-detected database structure: {} for '{}'.", leaderElectionDatabaseStructure.getClass().getSimpleName(), productName);
             }
@@ -188,8 +191,23 @@ public class LeaderElectionDAO {
             return new MySQLLeaderElectionDatabaseStructure();
         } else if (p.contains("sql server")) {
             return new SQLServerLeaderElectionDatabaseStructure();
+        } else if (p.contains("postgresql")) {
+            return new PostgreSQLLeaderElectionDatabaseStructure();
         }
         return new JDBCLeaderElectionDatabaseStructure();
+    }
+
+
+    /**
+     * Apply the table name override from the configuration, if set.
+     *
+     * @param structure the structure to apply the override to; may be {@code null}
+     */
+    private void applyTableNameOverride(LeaderElectionDatabaseStructure structure) {
+        String name = leaderElectionConfiguration.getTableName();
+        if (structure != null && name != null && !name.isBlank()) {
+            structure.setTableName(name);
+        }
     }
 
 

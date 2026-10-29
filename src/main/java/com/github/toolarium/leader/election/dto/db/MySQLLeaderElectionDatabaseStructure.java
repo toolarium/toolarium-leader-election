@@ -14,12 +14,24 @@ package com.github.toolarium.leader.election.dto.db;
  * @author patrick
  */
 public class MySQLLeaderElectionDatabaseStructure extends JDBCLeaderElectionDatabaseStructure {
+    /** Maximum table name length for MySQL. */
+    public static final int MAX_TABLE_NAME_LENGTH = 64;
+
 
     /**
      * Constructor for MySQLLeaderElectionDatabaseStructure
      */
     public MySQLLeaderElectionDatabaseStructure() {
         super();
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure#getMaxTableNameLength()
+     */
+    @Override
+    public int getMaxTableNameLength() {
+        return MAX_TABLE_NAME_LENGTH;
     }
 
 

@@ -14,12 +14,39 @@ import java.util.Locale;
  * @author patrick
  */
 public class JDBCLeaderElectionDatabaseStructure extends DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure {
+    /** Default maximum table name length for generic JDBC databases. */
+    public static final int MAX_TABLE_NAME_LENGTH = 128;
+
 
     /**
      * Constructor for JDBCLeaderElectionDatabaseStructure
      */
     public JDBCLeaderElectionDatabaseStructure() {
         super();
+    }
+
+
+    /**
+     * Returns the maximum identifier length for this database.
+     * Subclasses override this to match their database-specific limit.
+     *
+     * @return the maximum table name length in characters
+     */
+    public int getMaxTableNameLength() {
+        return MAX_TABLE_NAME_LENGTH;
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.DatabaseLeaderElectionConfiguration.LeaderElectionDatabaseStructure#setTableName(String)
+     */
+    @Override
+    public void setTableName(String tableName) {
+        if (tableName != null && tableName.length() > getMaxTableNameLength()) {
+            throw new IllegalArgumentException("Table name must not exceed " + getMaxTableNameLength()
+                    + " characters for " + getClass().getSimpleName() + ", got " + tableName.length() + ".");
+        }
+        super.setTableName(tableName);
     }
 
 

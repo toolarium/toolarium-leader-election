@@ -18,6 +18,7 @@ import com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStr
 import com.github.toolarium.leader.election.dto.db.MariaDBLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.MySQLLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.OracleLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.PostgreSQLLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.SQLServerLeaderElectionDatabaseStructure;
 import org.junit.jupiter.api.Test;
 
@@ -377,6 +378,42 @@ public class DatabaseStructureTest {
         assertDoesNotThrow(() -> s.setTableName("_private"));
         assertDoesNotThrow(() -> s.setTableName("schema.Table"));
         assertDoesNotThrow(() -> s.setTableName("Table$1"));
+    }
+
+
+    /**
+     * Test that setTableName() rejects names exceeding the database-specific maximum length
+     * for each supported structure class.
+     */
+    @Test
+    public void testSetTableNameMaxLengthPerDatabase() {
+        assertTableNameMaxLength(new JDBCLeaderElectionDatabaseStructure(), JDBCLeaderElectionDatabaseStructure.MAX_TABLE_NAME_LENGTH);
+        assertTableNameMaxLength(new PostgreSQLLeaderElectionDatabaseStructure(), PostgreSQLLeaderElectionDatabaseStructure.MAX_TABLE_NAME_LENGTH);
+        assertTableNameMaxLength(new MySQLLeaderElectionDatabaseStructure(), MySQLLeaderElectionDatabaseStructure.MAX_TABLE_NAME_LENGTH);
+        assertTableNameMaxLength(new MariaDBLeaderElectionDatabaseStructure(), MySQLLeaderElectionDatabaseStructure.MAX_TABLE_NAME_LENGTH);
+        assertTableNameMaxLength(new OracleLeaderElectionDatabaseStructure(), OracleLeaderElectionDatabaseStructure.MAX_TABLE_NAME_LENGTH);
+        assertTableNameMaxLength(new SQLServerLeaderElectionDatabaseStructure(), SQLServerLeaderElectionDatabaseStructure.MAX_TABLE_NAME_LENGTH);
+    }
+
+
+    /**
+     * Assert that the given structure accepts a table name at exactly the limit and rejects one character over.
+     *
+     * @param structure the database structure to test
+     * @param expectedMax the expected maximum table name length
+     */
+    private void assertTableNameMaxLength(JDBCLeaderElectionDatabaseStructure structure, int expectedMax) {
+        String label = structure.getClass().getSimpleName();
+
+        // exactly at the limit must not throw
+        String atLimit = "a".repeat(expectedMax);
+        assertDoesNotThrow(() -> structure.setTableName(atLimit), label + ": at limit should be accepted");
+
+        // one over the limit must throw
+        String overLimit = "a".repeat(expectedMax + 1);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> structure.setTableName(overLimit), label + ": over limit should throw");
+        assertTrue(ex.getMessage().contains(String.valueOf(expectedMax)), label + ": message should mention " + expectedMax);
     }
 
 

@@ -15,6 +15,7 @@ import com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStr
 import com.github.toolarium.leader.election.dto.db.MariaDBLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.MySQLLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.OracleLeaderElectionDatabaseStructure;
+import com.github.toolarium.leader.election.dto.db.PostgreSQLLeaderElectionDatabaseStructure;
 import com.github.toolarium.leader.election.dto.db.SQLServerLeaderElectionDatabaseStructure;
 import java.sql.Connection;
 import java.sql.Statement;
@@ -86,7 +87,7 @@ public class TableLookupTest {
         assertEquals(MariaDBLeaderElectionDatabaseStructure.class, dao.detectDatabaseStructure("MySQL compatible MariaDB").getClass());
         assertEquals(MySQLLeaderElectionDatabaseStructure.class, dao.detectDatabaseStructure("MySQL").getClass());
         assertEquals(SQLServerLeaderElectionDatabaseStructure.class, dao.detectDatabaseStructure("Microsoft SQL Server").getClass());
-        assertEquals(JDBCLeaderElectionDatabaseStructure.class, dao.detectDatabaseStructure("PostgreSQL").getClass());
+        assertEquals(PostgreSQLLeaderElectionDatabaseStructure.class, dao.detectDatabaseStructure("PostgreSQL").getClass());
         assertEquals(JDBCLeaderElectionDatabaseStructure.class, dao.detectDatabaseStructure("H2").getClass());
     }
 

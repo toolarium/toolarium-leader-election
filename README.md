@@ -164,6 +164,113 @@ ILeaderElector elector = LeaderElectionFactory.builder()
 
 The builder `timeout()`, `renewDeadline()`, `retryPeriod()`, and `closeTimeout()` are common to all strategies. Call `.file()`, `.database()`, `.network()`, or `.kubernetes()` to select a strategy; those timing values are applied to the strategy-specific configuration automatically.
 
+### Application example (Quarkus / CDI)
+
+Build a leader elector per election group and let it take part in the election at startup:
+
+```java
+@ApplicationScoped
+public class LeaderElectionService {
+
+    @Inject
+    DataSource dataSource;
+
+    ILeaderElector leaderElector;
+
+    // a LeaderElectionException fails the startup, the pod is restarted
+    void onStart(@Observes StartupEvent event) throws Exception {
+        leaderElector = LeaderElectionFactory.builder()
+                .name("application-initialization")  // the election group
+                .database()
+                    .dataSource(dataSource)
+                    .build();
+        leaderElector.elect();
+    }
+
+    void onStop(@Observes ShutdownEvent event) {
+        if (leaderElector != null) {
+            leaderElector.close();
+        }
+    }
+}
+```
+
+Then use the elector from a scheduled job without calling `elect()` again:
+
+```java
+@ApplicationScoped
+public class HourlyJob {
+
+    @Inject
+    LeaderElectionService leaderElectionService;
+
+    @Scheduled(every = "1h", concurrentExecution = ConcurrentExecution.SKIP)
+    void run() throws LeaderElectionException {
+        // runs only on the leader, returns false if another instance leads
+        leaderElectionService.leaderElector.runIfLeader("hourly-cleanup", this::cleanup);
+    }
+
+    private void cleanup() {
+        // ... application logic that must run on exactly one node
+    }
+}
+```
+
+The identity is resolved automatically from the hostname (or the `HOSTNAME` environment variable in Kubernetes), so each pod gets a unique identity without explicit configuration.
+
+### Rarely running job
+
+A job which runs e.g. once a day does not need a leader elector the whole day: build it in the job, elect, run the work on the leader and close it. Between the runs there is no leader elector and no load on the database.
+
+```java
+@Scheduled(cron = "0 0 2 * * ?") // every instance starts the job at 02:00
+void dailyExport() throws Exception {
+    try (ILeaderElector leaderElector = LeaderElectionFactory.builder()
+            .name("daily-export")
+            .database()
+                .dataSource(dataSource)
+                .build()) {
+        leaderElector.elect(); // the first election round decides the leader
+        leaderElector.runIfLeader("daily-export", lease -> {
+            if (!exportService.isDone(LocalDate.now())) { // the leader of a later round skips done work
+                exportService.export(lease);
+            }
+        });
+    } // close: the lead is released
+}
+```
+
+If the work takes longer than the lease timeout, call `tryExtend()` inside the task to push the deadline further out. This avoids switching to another instance mid-export:
+
+```java
+leaderElector.runIfLeader("daily-export", lease -> {
+    for (Batch batch : exportService.getBatches(LocalDate.now())) {
+        batch.export();
+        lease.tryExtend(); // keep the lease alive while work continues
+    }
+});
+```
+
+A long job keeps the lead: the lease is renewed in the background every `retryPeriod` while the job runs, `tryExtend()` is not needed. The lead is lost only if the renewal fails for `renewDeadline` (e.g. the database is not reachable); then `tryExtend()` fails as well. Split an expensive job into small, committed steps and call `lease.verify()` between them: after a takeover the new leader continues with the next step instead of starting over. Only a short critical step which must not start with little lead time left renews right before:
+
+```java
+leaderElector.runIfLeader("daily-export", lease -> {
+    for (Batch batch : exportService.getPendingBatches()) {
+        // guard: do not start a batch that might outlive the lease
+        if (lease.isExpiringSoon(Duration.ofSeconds(5)) && !lease.tryExtend()) {
+            return; // lead lost, the new leader continues
+        }
+        batch.export();
+        lease.verify(); // throws if lead was lost during the batch
+    }
+});
+```
+
+Notes:
+- `close()` releases the lead immediately: an instance which starts its job after that (scheduler delay, clock difference) becomes the leader and runs the job again. The job must therefore recognise its done work, e.g. by the date of the last run stored in its own table, in the same transaction as the work.
+- `build()` and `elect()` access the database: if it is not reachable, the job fails with a `LeaderElectionException` for this run only, the service keeps running.
+- Use an own election name for the job; it is not shared with the leader electors built at startup.
+
 ### LeaderElectionInformation
 
 `LeaderElectionInformation` identifies the election group and this node within it.
@@ -171,9 +278,23 @@ The builder `timeout()`, `renewDeadline()`, `retryPeriod()`, and `closeTimeout()
 | Constructor | When to use |
 |---|---|
 | `new LeaderElectionInformation("namespace", "name", "identity")` | Kubernetes strategy (required) or multi-group deployments |
-| `new LeaderElectionInformation("groupName")` | FILE, NETWORK, and DATABASE strategies; the value becomes both the group name and the node identity |
+| `new LeaderElectionInformation("groupName")` | FILE, NETWORK, and DATABASE strategies; the value becomes the group name, the identity is resolved automatically |
 
-For the DATABASE strategy the election group key is `"namespace.name"` (without the identity), so all nodes sharing the same namespace+name form one election group.
+When no identity is provided (null or blank), it is resolved automatically: the `HOSTNAME` environment variable (the pod name in Kubernetes), the local hostname, or a random UUID as last resort. Each elector gets a unique identity even when multiple electors run in the same JVM.
+
+For the DATABASE strategy the election group key is `"namespace.name"` (without the identity), so all nodes sharing the same namespace+name form one election group. The identity is stored in the `instance` column, so the database record shows a meaningful hostname instead of an internal UUID.
+
+#### Field length limits
+
+All string fields are validated against the database column sizes so that values that would be silently truncated or rejected by the database are caught early with a clear error message. The limits apply to every strategy, not only DATABASE.
+
+| Field | Max length | Database column |
+|---|---|---|
+| `namespace` + `name` (combined as `"namespace.name"`) | 512 characters | `name VARCHAR(512)` |
+| `identity` | 255 characters | `instance VARCHAR(255)` |
+| `username` | 255 characters | `username VARCHAR(255)` |
+
+Values that exceed these limits cause an `IllegalArgumentException` at construction time or when the setter is called.
 
 ### ILeaderElector API
 
@@ -427,7 +548,8 @@ By default the library uses `JDBCLeaderElectionDatabaseStructure`, which is comp
 
 | Database | Structure class |
 |---|---|
-| Generic / PostgreSQL / H2 | `JDBCLeaderElectionDatabaseStructure` *(default)* |
+| Generic / H2 | `JDBCLeaderElectionDatabaseStructure` *(default)* |
+| PostgreSQL | `PostgreSQLLeaderElectionDatabaseStructure` |
 | MySQL | `MySQLLeaderElectionDatabaseStructure` |
 | MariaDB | `MariaDBLeaderElectionDatabaseStructure` |
 | Oracle | `OracleLeaderElectionDatabaseStructure` |
@@ -450,7 +572,34 @@ config.setLeaderElectionDatabaseStructure(new MySQLLeaderElectionDatabaseStructu
 
 #### Custom table name
 
-All structure classes validate and reject SQL-unsafe names:
+The table name can be set directly on the builder or the configuration without having to create a database structure manually. The dialect is still auto-detected:
+
+```java
+// Via builder (recommended)
+ILeaderElector elector = LeaderElectionFactory.builder()
+    .namespace("ns").name("app").identity("node-1")
+    .database()
+        .dataSource(ds)
+        .tableName("myschema.MyElectionTable")
+        .build();
+
+// Or directly on the configuration
+DatabaseLeaderElectionConfiguration config = new DatabaseLeaderElectionConfiguration(10);
+config.setDataSource(ds);
+config.setTableName("myschema.MyElectionTable");
+```
+
+All structure classes validate and reject SQL-unsafe names. Each structure enforces the identifier length limit of its target database:
+
+| Structure | Max table name length |
+|---|---|
+| `JDBCLeaderElectionDatabaseStructure` (generic/H2) | 128 |
+| `PostgreSQLLeaderElectionDatabaseStructure` | 63 |
+| `MySQLLeaderElectionDatabaseStructure` / `MariaDBLeaderElectionDatabaseStructure` | 64 |
+| `OracleLeaderElectionDatabaseStructure` | 128 |
+| `SQLServerLeaderElectionDatabaseStructure` | 128 |
+
+For full control over the SQL dialect, supply a structure object directly:
 
 ```java
 JDBCLeaderElectionDatabaseStructure structure = new JDBCLeaderElectionDatabaseStructure();
@@ -470,7 +619,22 @@ config.setLeaderElectionDatabaseStructure(structure);
 | `retryPeriod` | 5 s | How often candidates attempt to acquire or renew the lease. Must be < `renewDeadline`. |
 | `closeTimeout` | 5 s | Maximum time `close()` waits for running leader tasks. Tasks that still run afterwards keep the lock: it is released once they ended, so no other node takes the lead meanwhile. |
 
-The convenience constructor `new LeaderElectionConfiguration(timeoutInSeconds)` computes `renewDeadline` and `retryPeriod` automatically from the timeout value. The no-arg constructor defaults to (10 s / 5 s / 5 s).
+The three timing parameters form a chain: `retryPeriod < renewDeadline < timeout`.
+
+```
+|<----- timeout (15 s) ------------------------------------------>|
+|<----- renewDeadline (10 s) ----------------------->|  (gap: 5 s) |
+|<-- retryPeriod (5 s) -->|<-- retryPeriod (5 s) -->|             |
+      renew tick               renew tick        step-down     takeover
+```
+
+- **retryPeriod**: how often the leader renews its lease and candidates check whether the lease expired. Shorter values detect a crashed leader faster but increase database load.
+- **renewDeadline**: if the leader cannot renew within this time (e.g. the database is slow or the JVM paused), it steps down. The gap between renewDeadline and timeout (`timeout - renewDeadline`) is the safety margin: it prevents two leaders by ensuring the old leader steps down before the new one can take over.
+- **timeout**: after this time without a renewal another node takes the lease. Set it large enough that a healthy leader always renews in time, even under load.
+
+Rule of thumb: `timeout >= 2 * retryPeriod`, `renewDeadline >= 2 * retryPeriod`, and leave at least 1 s (or `timeout / 4`) between renewDeadline and timeout. The builder derives these automatically when only `timeout()` is set.
+
+The convenience constructor `new LeaderElectionConfiguration(timeoutInSeconds)` computes `renewDeadline` and `retryPeriod` automatically from the timeout value. The no-arg constructor defaults to (15 s / 10 s / 5 s).
 
 ```java
 // Override close timeout if your shutdown budget is tight

@@ -248,6 +248,8 @@ public final class LeaderElectionFactory {
 
         /**
          * Set the namespace component of the election group identity.
+         * Together with {@code name} the combined election group name ({@code "namespace.name"})
+         * must not exceed {@value LeaderElectionInformation#MAX_ELECTION_GROUP_NAME_LENGTH} characters.
          *
          * @param namespace the namespace
          * @return this builder
@@ -260,6 +262,8 @@ public final class LeaderElectionFactory {
 
         /**
          * Set the name component of the election group identity.
+         * Together with {@code namespace} the combined election group name ({@code "namespace.name"})
+         * must not exceed {@value LeaderElectionInformation#MAX_ELECTION_GROUP_NAME_LENGTH} characters.
          *
          * @param name the name
          * @return this builder
@@ -272,6 +276,7 @@ public final class LeaderElectionFactory {
 
         /**
          * Set the per-node identity (e.g. hostname or pod name).
+         * Must not exceed {@value LeaderElectionInformation#MAX_IDENTITY_LENGTH} characters.
          *
          * @param identity the identity
          * @return this builder
@@ -285,6 +290,7 @@ public final class LeaderElectionFactory {
         /**
          * Override the OS username stored in the leader record.
          * When not set the value of {@code System.getProperty("user.name")} is used.
+         * Must not exceed {@value LeaderElectionInformation#MAX_USERNAME_LENGTH} characters.
          *
          * @param username the username
          * @return this builder
@@ -493,6 +499,7 @@ public final class LeaderElectionFactory {
     public static final class DatabaseBuilder {
         private final Builder parent;
         private DataSource dataSource;
+        private String tableName;
         private LeaderElectionDatabaseStructure databaseStructure;
 
 
@@ -514,6 +521,20 @@ public final class LeaderElectionFactory {
          */
         public DatabaseBuilder dataSource(DataSource dataSource) {
             this.dataSource = dataSource;
+            return this;
+        }
+
+
+        /**
+         * Set the table name. The name is applied to the auto-detected or caller-supplied
+         * database structure, so the dialect is still detected automatically. This is a
+         * shortcut for calling {@code databaseStructure.setTableName()} manually.
+         *
+         * @param tableName the table name
+         * @return this builder
+         */
+        public DatabaseBuilder tableName(String tableName) {
+            this.tableName = tableName;
             return this;
         }
 
@@ -542,6 +563,9 @@ public final class LeaderElectionFactory {
             config.setDataSource(dataSource);
             if (databaseStructure != null) {
                 config.setLeaderElectionDatabaseStructure(databaseStructure);
+            }
+            if (tableName != null) {
+                config.setTableName(tableName);
             }
             return LeaderElectionFactory.getInstance().getLeaderElection(LeaderElectionStrategy.DATABASE, parent.buildInfo(), config);
         }

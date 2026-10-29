@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [ 1.3.1 ] - 2026-10-26
+## [ 1.3.1 ] - 2026-10-29
+### Added
+- **ALL**: maximum length validation for namespace, name, identity, username, and table name fields.
+- **ALL**: default identity resolved from hostname (`HOSTNAME` env var, then local hostname) instead of a random UUID.
+- **DATABASE**: `tableName()` on the builder and `setTableName()` on `DatabaseLeaderElectionConfiguration` set the table name without giving up auto-detection of the database dialect.
+- **DATABASE**: `PostgreSQLLeaderElectionDatabaseStructure` for PostgreSQL; auto-detected from the JDBC product name.
+- **DATABASE**: the `instance` column stores the elector identity instead of an internal UUID, so the database record shows a meaningful hostname.
+
+### Changed
+- **ALL**: improved validation error messages now include the actual and expected values.
 
 ## [ 1.3.0 ] - 2026-10-24
 ### Added

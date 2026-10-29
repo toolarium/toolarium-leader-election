@@ -12,12 +12,24 @@ package com.github.toolarium.leader.election.dto.db;
  * @author patrick
  */
 public class OracleLeaderElectionDatabaseStructure extends JDBCLeaderElectionDatabaseStructure {
+    /** Maximum table name length for Oracle (since 12.2; earlier versions allow 30). */
+    public static final int MAX_TABLE_NAME_LENGTH = 128;
+
 
     /**
      * Constructor for OracleLeaderElectionDatabaseStructure
      */
     public OracleLeaderElectionDatabaseStructure() {
         super();
+    }
+
+
+    /**
+     * @see com.github.toolarium.leader.election.dto.db.JDBCLeaderElectionDatabaseStructure#getMaxTableNameLength()
+     */
+    @Override
+    public int getMaxTableNameLength() {
+        return MAX_TABLE_NAME_LENGTH;
     }
 
 
