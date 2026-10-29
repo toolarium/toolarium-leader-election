@@ -763,4 +763,4 @@ The containers need several GB of memory together; if the run is aborted or cont
 
 ## Versioning
 
-We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository].
+We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/toolarium/toolarium-leader-election/tags).
