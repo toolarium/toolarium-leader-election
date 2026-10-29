@@ -443,7 +443,7 @@ char[] password = ...; // e.g. from a secret store
 ILeaderElector leaderElector = LeaderElectionFactory.builder()
     .namespace("namespace").name("my-service").identity("node-1")
     .network().encryptionKey("/etc/my-service/leader-election.p12", password, "leader-election").build();
-Arrays.fill(password, ' '); // the password is no longer needed
+Arrays.fill(password, ' '); // the password is no longer needed
 ```
 
 A `javax.crypto.SecretKey` can also be passed directly, e.g. from a secret store: `.network().encryptionKey(secretKey)`. Only AES keys of 128, 192 or 256 bits are accepted, created randomly (`keytool` as above, or `KeyGenerator.getInstance("AES")`), never derived from a password: JGroups sends a hash of the key with every message, so a weak key could be found from it.
