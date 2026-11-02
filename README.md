@@ -1,5 +1,5 @@
 [![License](https://img.shields.io/github/license/toolarium/toolarium-leader-election)](https://github.com/toolarium/toolarium-leader-election/blob/master/LICENSE)
-[![Maven Central](https://img.shields.io/maven-central/v/com.github.toolarium/toolarium-leader-election/1.3.0)](https://search.maven.org/artifact/com.github.toolarium/toolarium-leader-election/1.3.0/jar)
+[![Maven Central](https://img.shields.io/maven-central/v/com.github.toolarium/toolarium-leader-election/1.3.1)](https://search.maven.org/artifact/com.github.toolarium/toolarium-leader-election/1.3.1/jar)
 [![javadoc](https://javadoc.io/badge2/com.github.toolarium/toolarium-leader-election/javadoc.svg)](https://javadoc.io/doc/com.github.toolarium/toolarium-leader-election)
 
 # toolarium-leader-election
@@ -23,7 +23,7 @@ A strategy must always be specified explicitly; the factory will throw if none i
 
 **Gradle**
 ```gradle
-implementation 'com.github.toolarium:toolarium-leader-election:1.3.0'
+implementation 'com.github.toolarium:toolarium-leader-election:1.3.1'
 ```
 
 **Maven**
@@ -31,7 +31,7 @@ implementation 'com.github.toolarium:toolarium-leader-election:1.3.0'
 <dependency>
     <groupId>com.github.toolarium</groupId>
     <artifactId>toolarium-leader-election</artifactId>
-    <version>1.3.0</version>
+    <version>1.3.1</version>
 </dependency>
 ```
 
@@ -480,8 +480,8 @@ rules:
 
 **Upgrading from 1.2.x:** releases up to 1.2.x lock an Endpoints object instead. Nodes with different lock types do not see each other's lock, so during a rolling upgrade an old and a new node could both lead. Either stop all old pods before the new ones start (Deployment strategy `Recreate`), or upgrade in two steps:
 
-1. Deploy 1.3.0 with `.kubernetes().lockType(KubernetesLockType.ENDPOINTS)`; the existing RBAC rules for `endpoints` still apply.
-2. Once all pods run 1.3.0, add the `leases` rule above, remove the `lockType` line and deploy again. The Endpoints permissions can then be removed.
+1. Deploy 1.3.1 with `.kubernetes().lockType(KubernetesLockType.ENDPOINTS)`; the existing RBAC rules for `endpoints` still apply.
+2. Once all pods run 1.3.1, add the `leases` rule above, remove the `lockType` line and deploy again. The Endpoints permissions can then be removed.
 
 ### DATABASE strategy
 
